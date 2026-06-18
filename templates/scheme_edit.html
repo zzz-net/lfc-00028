@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}{% if is_upgrade %}升级标签方案{% elif scheme %}编辑标签方案{% else %}新建标签方案{% endif %}{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>{% if is_upgrade %}升级标签方案{% elif scheme %}编辑标签方案{% else %}新建标签方案{% endif %}</h1>
+    <a href="{{ url_for('schemes') }}" class="btn btn-outline">← 返回列表</a>
+</div>
+
+<div class="card">
+    {% if is_upgrade %}
+    <div class="flash flash-warning" style="margin-bottom:20px;">
+        ⚠️ 升级会创建新版本方案，旧版本方案的<strong>所有数据（样本、标注、冲突记录）会保留在原版本中</strong>，不会自动迁移到新版本。
+    </div>
+    {% endif %}
+    <form method="post" onsubmit="return collectLabels()">
+        <div class="form-group">
+            <label>方案名称 *</label>
+            <input type="text" name="name" class="form-control" required
+                   value="{{ scheme.name if scheme else '' }}" placeholder="如：情感分析标注方案">
+        </div>
+        <div class="form-group">
+            <label>方案描述</label>
+            <textarea name="description" class="form-control" placeholder="描述该标签方案的用途和说明">{{ scheme.description if scheme and scheme.description else '' }}</textarea>
+        </div>
+
+        <div class="form-group">
+            <div class="flex justify-between items-center mb-4">
+                <label class="mb-0"><strong>标签列表</strong>（标签键为内部标识，标签文本为显示名称）</label>
+                <button type="button" class="btn btn-primary btn-sm" onclick="addLabelRow()">+ 添加标签</button>
+            </div>
+            <div id="labels-container" class="labels-editor">
+                {% if labels %}
+                    {% for l in labels %}
+                    <div class="label-row">
+                        <input type="text" class="form-control label-key" placeholder="标签键（如 positive）" value="{{ l.label_key }}">
+                        <input type="text" class="form-control label-text" placeholder="标签文本（如 正面）" value="{{ l.label_text }}">
+                        <input type="color" class="form-control label-color" value="{{ l.color or '#3b82f6' }}" style="height:36px;padding:2px;">
+                        <input type="text" class="form-control label-desc" placeholder="描述（可选）" value="{{ l.description or '' }}">
+                        <button type="button" class="btn btn-danger btn-sm" onclick="this.parentElement.remove()">×</button>
+                    </div>
+                    {% endfor %}
+                {% endif %}
+            </div>
+        </div>
+        <input type="hidden" id="labels-json" name="labels_json" value="[]">
+
+        <div class="flex gap-2">
+            <button type="submit" class="btn btn-primary">
+                {% if is_upgrade %}创建新版本{% else %}保存方案{% endif %}
+            </button>
+            <a href="{{ url_for('schemes') }}" class="btn btn-outline">取消</a>
+        </div>
+    </form>
+</div>
+{% endblock %}

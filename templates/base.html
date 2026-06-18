@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}离线文本标注复核工具{% endblock %}</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+            background: #f0f2f5;
+            color: #1f2937;
+            line-height: 1.6;
+        }
+        .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+
+        .top-nav {
+            background: linear-gradient(135deg, #1e40af 0%, #3b82f6 100%);
+            color: white;
+            padding: 0 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            height: 60px;
+        }
+        .top-nav .brand { font-size: 18px; font-weight: 600; }
+        .top-nav .user-info { display: flex; align-items: center; gap: 16px; font-size: 14px; }
+        .top-nav .user-info .role-badge {
+            background: rgba(255,255,255,0.2);
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+        }
+        .top-nav a { color: white; text-decoration: none; }
+        .top-nav a:hover { text-decoration: underline; }
+
+        .layout { display: flex; gap: 0; min-height: calc(100vh - 60px); }
+        .sidebar {
+            width: 220px;
+            background: #fff;
+            border-right: 1px solid #e5e7eb;
+            padding: 16px 0;
+        }
+        .sidebar a {
+            display: block;
+            padding: 10px 20px;
+            color: #4b5563;
+            text-decoration: none;
+            font-size: 14px;
+            border-left: 3px solid transparent;
+            transition: all 0.2s;
+        }
+        .sidebar a:hover, .sidebar a.active {
+            background: #eff6ff;
+            color: #1e40af;
+            border-left-color: #3b82f6;
+        }
+        .sidebar .section-title {
+            padding: 12px 20px 6px;
+            font-size: 12px;
+            color: #9ca3af;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .main-content { flex: 1; padding: 24px; overflow-x: auto; }
+
+        .page-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+        }
+        .page-header h1 { font-size: 22px; color: #111827; }
+        .page-header .actions { display: flex; gap: 10px; }
+
+        .card {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .card-title { font-size: 16px; font-weight: 600; margin-bottom: 16px; color: #111827; }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        .stat-card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+            border-left: 4px solid #3b82f6;
+        }
+        .stat-card.green { border-left-color: #10b981; }
+        .stat-card.orange { border-left-color: #f59e0b; }
+        .stat-card.red { border-left-color: #ef4444; }
+        .stat-card.purple { border-left-color: #8b5cf6; }
+        .stat-card .stat-label { font-size: 13px; color: #6b7280; margin-bottom: 6px; }
+        .stat-card .stat-value { font-size: 28px; font-weight: 700; color: #111827; }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+        table th, table td {
+            padding: 10px 12px;
+            text-align: left;
+            border-bottom: 1px solid #e5e7eb;
+        }
+        table th {
+            background: #f9fafb;
+            font-weight: 600;
+            color: #374151;
+            font-size: 13px;
+        }
+        table tr:hover td { background: #f9fafb; }
+
+        .btn {
+            display: inline-block;
+            padding: 7px 16px;
+            font-size: 14px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            text-decoration: none;
+            transition: all 0.2s;
+            font-weight: 500;
+        }
+        .btn-primary { background: #3b82f6; color: white; }
+        .btn-primary:hover { background: #2563eb; }
+        .btn-success { background: #10b981; color: white; }
+        .btn-success:hover { background: #059669; }
+        .btn-warning { background: #f59e0b; color: white; }
+        .btn-warning:hover { background: #d97706; }
+        .btn-danger { background: #ef4444; color: white; }
+        .btn-danger:hover { background: #dc2626; }
+        .btn-secondary { background: #6b7280; color: white; }
+        .btn-secondary:hover { background: #4b5563; }
+        .btn-outline { background: white; color: #374151; border: 1px solid #d1d5db; }
+        .btn-outline:hover { background: #f9fafb; }
+        .btn-sm { padding: 4px 10px; font-size: 12px; }
+
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        .badge-green { background: #d1fae5; color: #065f46; }
+        .badge-red { background: #fee2e2; color: #991b1b; }
+        .badge-yellow { background: #fef3c7; color: #92400e; }
+        .badge-blue { background: #dbeafe; color: #1e40af; }
+        .badge-gray { background: #f3f4f6; color: #374151; }
+        .badge-purple { background: #ede9fe; color: #5b21b6; }
+
+        .form-group { margin-bottom: 16px; }
+        .form-group label { display: block; margin-bottom: 6px; font-size: 14px; font-weight: 500; color: #374151; }
+        .form-control {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 14px;
+            font-family: inherit;
+        }
+        .form-control:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.1); }
+        textarea.form-control { min-height: 100px; resize: vertical; }
+        select.form-control { cursor: pointer; }
+
+        .filter-bar {
+            background: white;
+            padding: 16px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 12px;
+            align-items: flex-end;
+            flex-wrap: wrap;
+        }
+        .filter-bar .form-group { margin-bottom: 0; min-width: 180px; }
+
+        .flash-messages { margin-bottom: 20px; }
+        .flash {
+            padding: 12px 16px;
+            border-radius: 6px;
+            margin-bottom: 10px;
+            font-size: 14px;
+        }
+        .flash-success { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
+        .flash-error { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+        .flash-warning { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
+
+        .login-wrapper {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
+        }
+        .login-box {
+            background: white;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+            width: 400px;
+        }
+        .login-box h1 { text-align: center; margin-bottom: 8px; color: #111827; }
+        .login-box .subtitle { text-align: center; color: #6b7280; margin-bottom: 28px; font-size: 14px; }
+        .login-box .btn { width: 100%; padding: 10px; margin-top: 8px; }
+
+        .label-tag {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 4px;
+            color: white;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
+
+        .annotation-block {
+            border: 1px solid #e5e7eb;
+            border-radius: 6px;
+            padding: 14px;
+            margin-bottom: 12px;
+            background: #fafafa;
+        }
+        .annotation-block .meta {
+            font-size: 13px;
+            color: #6b7280;
+            margin-bottom: 8px;
+            display: flex;
+            justify-content: space-between;
+        }
+        .annotation-block .content { font-size: 14px; line-height: 1.7; white-space: pre-wrap; }
+        .sample-content {
+            background: #fffbeb;
+            border: 1px solid #fcd34d;
+            border-radius: 6px;
+            padding: 16px;
+            font-size: 15px;
+            line-height: 1.8;
+            white-space: pre-wrap;
+            margin-bottom: 20px;
+        }
+
+        .history-item {
+            padding: 12px 0;
+            border-bottom: 1px solid #f0f0f0;
+            font-size: 13px;
+        }
+        .history-item:last-child { border-bottom: none; }
+        .history-item .time { color: #9ca3af; font-size: 12px; }
+        .history-item .action { font-weight: 600; color: #374151; }
+
+        .labels-editor { margin-top: 16px; }
+        .label-row {
+            display: grid;
+            grid-template-columns: 1fr 2fr 100px 2fr 40px;
+            gap: 8px;
+            margin-bottom: 8px;
+            align-items: center;
+        }
+        .label-row input, .label-row button { margin-bottom: 0 !important; }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #9ca3af;
+        }
+        .empty-state .icon { font-size: 48px; margin-bottom: 16px; }
+
+        a { color: #3b82f6; }
+        a:hover { color: #1d4ed8; }
+        .text-muted { color: #6b7280; }
+        .text-sm { font-size: 12px; }
+        .text-danger { color: #ef4444; }
+        .text-success { color: #10b981; }
+        .mb-0 { margin-bottom: 0; }
+        .mb-4 { margin-bottom: 16px; }
+        .mb-8 { margin-bottom: 32px; }
+        .mt-4 { margin-top: 16px; }
+        .flex { display: flex; }
+        .gap-2 { gap: 8px; }
+        .items-center { align-items: center; }
+        .justify-between { justify-content: space-between; }
+    </style>
+</head>
+<body>
+    <div class="top-nav">
+        <div class="brand">📝 离线文本标注复核工具</div>
+        <div class="user-info">
+            <span>{{ current_user.display_name }}</span>
+            <span class="role-badge">
+                {% if current_user.is_admin() %}管理员
+                {% elif current_user.is_reviewer() %}复核员
+                {% else %}标注员{% endif %}
+            </span>
+            <a href="{{ url_for('logout') }}">退出登录</a>
+        </div>
+    </div>
+    <div class="layout">
+        <div class="sidebar">
+            <a href="{{ url_for('dashboard') }}" class="{% if request.endpoint == 'dashboard' %}active{% endif %}">📊 仪表盘</a>
+            <a href="{{ url_for('samples') }}" class="{% if 'sample' in request.endpoint %}active{% endif %}">📋 样本管理</a>
+            <a href="{{ url_for('annotations') }}" class="{% if 'annotation' in request.endpoint %}active{% endif %}">🏷️ 标注结果</a>
+            <a href="{{ url_for('conflicts') }}" class="{% if 'conflict' in request.endpoint %}active{% endif %}">⚠️ 冲突管理</a>
+            {% if current_user.is_reviewer() or current_user.is_admin() %}
+            <a href="{{ url_for('reviews') }}" class="{% if 'review' in request.endpoint %}active{% endif %}">🔍 复核任务</a>
+            {% endif %}
+            {% if current_user.is_admin() %}
+            <div class="section-title">管理功能</div>
+            <a href="{{ url_for('schemes') }}" class="{% if 'scheme' in request.endpoint %}active{% endif %}">📑 标签方案</a>
+            <a href="{{ url_for('users') }}" class="{% if 'user' in request.endpoint %}active{% endif %}">👥 用户管理</a>
+            <a href="{{ url_for('export_page') }}" class="{% if 'export' in request.endpoint %}active{% endif %}">📤 数据导出</a>
+            <a href="{{ url_for('history') }}" class="{% if request.endpoint == 'history' %}active{% endif %}">📜 修订历史</a>
+            {% endif %}
+        </div>
+        <div class="main-content">
+            <div class="flash-messages">
+                {% with messages = get_flashed_messages(with_categories=true) %}
+                    {% for category, message in messages %}
+                        <div class="flash flash-{{ category }}">{{ message }}</div>
+                    {% endfor %}
+                {% endwith %}
+            </div>
+            {% block content %}{% endblock %}
+        </div>
+    </div>
+<script>
+function addLabelRow() {
+    const container = document.getElementById('labels-container');
+    const colors = ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#14b8a6','#f97316'];
+    const color = colors[container.children.length % colors.length];
+    const div = document.createElement('div');
+    div.className = 'label-row';
+    div.innerHTML = `
+        <input type="text" class="form-control label-key" placeholder="标签键（如 positive）">
+        <input type="text" class="form-control label-text" placeholder="标签文本（如 正面）">
+        <input type="color" class="form-control label-color" value="${color}" style="height:36px;padding:2px;">
+        <input type="text" class="form-control label-desc" placeholder="描述（可选）">
+        <button type="button" class="btn btn-danger btn-sm" onclick="this.parentElement.remove()">×</button>
+    `;
+    container.appendChild(div);
+}
+function collectLabels() {
+    const rows = document.querySelectorAll('#labels-container .label-row');
+    const labels = [];
+    rows.forEach(row => {
+        const key = row.querySelector('.label-key').value.trim();
+        const text = row.querySelector('.label-text').value.trim();
+        const color = row.querySelector('.label-color').value;
+        const desc = row.querySelector('.label-desc').value.trim();
+        if (key && text) labels.push({key, text, color, description: desc});
+    });
+    document.getElementById('labels-json').value = JSON.stringify(labels);
+    return true;
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}执行复核 - 任务 #{{ task.id }}{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>执行复核 - 任务 #{{ task.id }}
+        {% if task.status == 'reviewed' %}
+        <span class="badge badge-green">已完成</span>
+        {% else %}
+        <span class="badge badge-yellow">待处理</span>
+        {% endif %}
+    </h1>
+    <a href="{{ url_for('reviews') }}" class="btn btn-outline">← 返回任务列表</a>
+</div>
+
+<div class="card">
+    <div class="card-title">样本信息</div>
+    <p><strong>样本编号：</strong><code>{{ task.sample_id }}</code></p>
+    <p><strong>标签方案：</strong>{{ task.scheme_name }} v{{ task.scheme_version }}</p>
+    <div class="sample-content">{{ task.content }}</div>
+</div>
+
+<div class="card">
+    <div class="card-title">各方标注意见（请仔细对比）</div>
+    {% for a in conflict_annotations %}
+    <div class="annotation-block">
+        <div class="meta">
+            <span><strong>{{ a.annotator_name }}</strong> 的标注</span>
+            <span class="text-sm text-muted">{{ a.created_at }}</span>
+        </div>
+        <div style="margin:8px 0;">
+            {% if a.is_unknown_label %}
+            <span class="badge badge-red" style="font-size:14px;padding:4px 14px;">标签：{{ a.label_text }}（未知标签）</span>
+            {% else %}
+            <span class="badge badge-blue" style="font-size:14px;padding:4px 14px;">标签：{{ a.label_text }}</span>
+            {% endif %}
+        </div>
+        {% if a.comment %}
+        <div class="content"><strong>标注说明：</strong>{{ a.comment }}</div>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>
+
+{% if task.status == 'reviewed' %}
+<div class="card">
+    <div class="card-title">复核结论（已完成）</div>
+    <p><strong>决策标签：</strong><span class="badge badge-green" style="font-size:14px;padding:4px 14px;">{{ task.decision_label_text }}</span></p>
+    <p><strong>复核时间：</strong>{{ task.reviewed_at }}</p>
+    {% if task.reviewer_comment %}
+    <p style="margin-top:12px;"><strong>复核意见：</strong></p>
+    <div style="background:#f0fdf4; padding:14px; border-radius:6px; border:1px solid #86efac;">
+        {{ task.reviewer_comment }}
+    </div>
+    {% endif %}
+</div>
+{% else %}
+<div class="card">
+    <div class="card-title">做出复核决定</div>
+    <form method="post">
+        <div class="form-group">
+            <label>选择最终标签 *</label>
+            <select name="label_id" class="form-control" required style="font-size:15px;padding:10px;">
+                <option value="">-- 请选择最终标签 --</option>
+                {% for l in labels %}
+                <option value="{{ l.id }}">
+                    [{{ l.label_key }}] {{ l.label_text }}{% if l.description %} - {{ l.description }}{% endif %}
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="form-group">
+            <label>复核意见 / 说明</label>
+            <textarea name="comment" class="form-control" rows="4" placeholder="请说明做出该决定的理由、参考依据等，作为审计证据留存..."></textarea>
+        </div>
+        <button type="submit" class="btn btn-success" onclick="return confirm('确认提交复核决定？此操作将标记冲突为已解决。')">
+            ✓ 提交复核决定
+        </button>
+    </form>
+</div>
+{% endif %}
+{% endblock %}

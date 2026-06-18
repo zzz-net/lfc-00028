@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}导入样本{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>导入样本</h1>
+    <a href="{{ url_for('samples') }}" class="btn btn-outline">← 返回</a>
+</div>
+
+<div class="two-col">
+    <div class="card">
+        <div class="card-title">上传样本文件</div>
+        <form method="post" enctype="multipart/form-data">
+            <div class="form-group">
+                <label>选择标签方案 *</label>
+                <select name="scheme_id" class="form-control" required>
+                <option value="">-- 请选择 --</option>
+                {% for s in schemes %}
+                <option value="{{ s.id }}">{{ s.name }} v{{ s.version }}{% if s.is_active %} (当前启用){% endif %}</option>
+                {% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label>CSV 文件 *</label>
+                <input type="file" name="file" accept=".csv" class="form-control" required>
+            </div>
+            <button type="submit" class="btn btn-primary">开始导入</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <div class="card-title">CSV 格式说明</div>
+        <p style="font-size:14px; color:#4b5563; margin-bottom:12px;">
+            CSV 文件需包含以下列名（列名不区分大小写变体）：
+        </p>
+        <ul style="padding-left:20px; font-size:14px; line-height:2;">
+            <li><code>sample_id</code> / <code>id</code> - <strong>样本唯一编号</strong>（必填，重复会被跳过）</li>
+            <li><code>content</code> / <code>text</code> / <code>sample</code> - <strong>文本内容</strong>（必填）</li>
+            <li>其他列会作为元数据保存</li>
+        </ul>
+        <div style="margin-top:16px; padding:12px; background:#f9fafb; border-radius:6px;">
+            <p style="font-size:13px; font-family:monospace;">
+sample_id,content,category<br>
+S001,这个产品非常好用,电子产品<br>
+S002,服务态度很差,服务评价
+            </p>
+        </div>
+        <p class="text-sm text-muted mt-4">⚠️ 重复编号的样本会被自动检测并跳过，不会覆盖原有记录。</p>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}{{ scheme.name }} v{{ scheme.version }}{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>{{ scheme.name }} <span class="badge badge-blue">v{{ scheme.version }}</span></h1>
+    <div class="actions">
+        <a href="{{ url_for('schemes') }}" class="btn btn-outline">← 返回列表</a>
+        {% if scheme.is_active and current_user.is_admin() %}
+        <a href="{{ url_for('upgrade_scheme', scheme_id=scheme.id) }}" class="btn btn-warning">升级方案</a>
+        {% endif %}
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">方案信息</div>
+    <div class="two-col">
+        <div>
+            <p><strong>状态：</strong>
+                {% if scheme.is_active %}
+                <span class="badge badge-green">当前启用</span>
+                {% else %}
+                <span class="badge badge-gray">历史版本（旧数据保留在此版本）</span>
+                {% endif %}
+            </p>
+            <p><strong>描述：</strong>{{ scheme.description or '无' }}</p>
+            <p><strong>创建时间：</strong>{{ scheme.created_at }}</p>
+        </div>
+        <div>
+            <p><strong>标签数量：</strong>{{ labels|length }} 个</p>
+            <p><strong>关联样本：</strong>
+                <a href="{{ url_for('samples') }}?scheme_id={{ scheme.id }}">查看样本</a>
+            </p>
+            <p><strong>关联标注：</strong>
+                <a href="{{ url_for('annotations') }}?scheme_id={{ scheme.id }}">查看标注</a>
+            </p>
+        </div>
+    </div>
+    {% if not scheme.is_active %}
+    <div class="flash flash-warning" style="margin-top:16px;">
+        ℹ️ 此为历史版本方案。该版本的标注数据保留独立展示，不会自动迁移到新版本。
+    </div>
+    {% endif %}
+</div>
+
+<div class="card">
+    <div class="card-title">标签定义（共 {{ labels|length }} 个）</div>
+    {% if labels %}
+    <table>
+        <thead>
+            <tr><th>颜色</th><th>标签键</th><th>标签文本</th><th>描述</th></tr>
+        </thead>
+        <tbody>
+            {% for l in labels %}
+            <tr>
+                <td><span class="label-tag" style="background:{{ l.color }};">■</span></td>
+                <td><code>{{ l.label_key }}</code></td>
+                <td>{{ l.label_text }}</td>
+                <td class="text-muted">{{ l.description or '-' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="text-muted">暂无标签定义</p>
+    {% endif %}
+</div>
+
+{% if old_annotations %}
+<div class="card">
+    <div class="card-title">此版本的标注数据（展示最近 50 条）</div>
+    <table>
+        <thead>
+            <tr><th>样本编号</th><th>样本内容</th><th>标注员</th><th>标签</th><th>是否未知</th><th>备注</th><th>时间</th></tr>
+        </thead>
+        <tbody>
+            {% for a in old_annotations %}
+            <tr>
+                <td>{{ a.sample_id }}</td>
+                <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ a.content }}</td>
+                <td>{{ a.annotator_name }}</td>
+                <td>
+                    {% if a.is_unknown_label %}
+                    <span class="badge badge-red">{{ a.label_text }} (未知)</span>
+                    {% else %}
+                    <span class="badge badge-blue">{{ a.label_text }}</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if a.is_unknown_label %}
+                    <span class="badge badge-red">是</span>
+                    {% else %}<span class="badge badge-green">否</span>{% endif %}
+                </td>
+                <td class="text-sm text-muted">{{ a.comment or '-' }}</td>
+                <td class="text-sm text-muted">{{ a.created_at }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+{% endblock %}

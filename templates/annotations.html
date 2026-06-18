@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}标注结果{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>标注结果</h1>
+    <div class="actions">
+        {% if current_user.is_admin() or current_user.is_annotator() %}
+        <a href="{{ url_for('import_annotations') }}" class="btn btn-primary">+ 导入标注</a>
+        {% endif %}
+    </div>
+</div>
+
+<div class="filter-bar">
+    <form method="get" class="flex gap-2 items-end flex-wrap">
+        <div class="form-group">
+            <label>标签方案</label>
+            <select name="scheme_id" class="form-control">
+                <option value="">全部</option>
+                {% for s in schemes %}
+                <option value="{{ s.id }}" {% if scheme_filter|string == s.id|string %}selected{% endif %}>
+                    {{ s.name }} v{{ s.version }}{% if s.is_active %} (当前){% endif %}
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+        {% if current_user.is_admin() %}
+        <div class="form-group">
+            <label>标注员</label>
+            <select name="annotator_id" class="form-control">
+                <option value="">全部</option>
+                {% for u in users if u.role == 'annotator' %}
+                <option value="{{ u.id }}" {% if annotator_filter|string == u.id|string %}selected{% endif %}>
+                    {{ u.display_name }} ({{ u.username }})
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+        {% endif %}
+        <div class="form-group">
+            <label>仅显示未知标签</label>
+            <select name="unknown_only" class="form-control">
+                <option value="">否</option>
+                <option value="1" {% if unknown_only == '1' %}selected{% endif %}>是</option>
+            </select>
+        </div>
+        <button type="submit" class="btn btn-primary">筛选</button>
+        <a href="{{ url_for('annotations') }}" class="btn btn-outline">重置</a>
+    </form>
+</div>
+
+<div class="card">
+    {% if annotations %}
+    <table>
+        <thead>
+            <tr>
+                <th>样本编号</th>
+                <th>内容</th>
+                <th>标注员</th>
+                <th>标签</th>
+                <th>方案版本</th>
+                <th>是否未知</th>
+                <th>备注</th>
+                <th>时间</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for a in annotations %}
+            <tr>
+                <td><a href="{{ url_for('view_sample', sample_id=a.sample_id) }}">{{ a.sample_id }}</a></td>
+                <td style="max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ a.content }}</td>
+                <td>{{ a.annotator_name }}</td>
+                <td>
+                    {% if a.is_unknown_label %}
+                    <span class="badge badge-red">{{ a.label_text }} (未知!)</span>
+                    {% else %}
+                    <span class="badge badge-blue">{{ a.label_text }}</span>
+                    {% endif %}
+                </td>
+                <td class="text-sm text-muted">{{ a.scheme_name }} v{{ a.scheme_version }}</td>
+                <td>
+                    {% if a.is_unknown_label %}
+                    <span class="badge badge-red">是</span>
+                    {% else %}
+                    <span class="badge badge-green">否</span>
+                    {% endif %}
+                </td>
+                <td class="text-sm text-muted">{{ a.comment or '-' }}</td>
+                <td class="text-sm text-muted">{{ a.created_at }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <div class="icon">🏷️</div>
+        <p>暂无标注数据</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

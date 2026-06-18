@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block title %}仪表盘{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>仪表盘</h1>
+</div>
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-label">样本总数</div>
+        <div class="stat-value">{{ stats.total_samples }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">标注总数</div>
+        <div class="stat-value">{{ stats.total_annotations }}</div>
+    </div>
+    <div class="stat-card orange">
+        <div class="stat-label">待处理冲突</div>
+        <div class="stat-value">{{ stats.open_conflicts }}</div>
+    </div>
+    <div class="stat-card green">
+        <div class="stat-label">已解决冲突</div>
+        <div class="stat-value">{{ stats.resolved_conflicts }}</div>
+    </div>
+    {% if current_user.is_annotator() %}
+    <div class="stat-card purple">
+        <div class="stat-label">我的标注</div>
+        <div class="stat-value">{{ stats.my_annotations }}</div>
+    </div>
+    {% endif %}
+    {% if current_user.is_reviewer() %}
+    <div class="stat-card orange">
+        <div class="stat-label">待我复核</div>
+        <div class="stat-value">{{ stats.my_reviews_pending }}</div>
+    </div>
+    <div class="stat-card green">
+        <div class="stat-label">已复核</div>
+        <div class="stat-value">{{ stats.my_reviews_done }}</div>
+    </div>
+    {% endif %}
+</div>
+
+<div class="card">
+    <div class="card-title">标签方案</div>
+    {% if active_schemes %}
+    <table>
+        <thead>
+            <tr><th>方案名称</th><th>版本</th><th>标签数</th><th>状态</th><th>创建时间</th><th>操作</th></tr>
+        </thead>
+        <tbody>
+            {% for s in active_schemes %}
+            <tr>
+                <td>{{ s.name }}</td>
+                <td>v{{ s.version }}</td>
+                <td>{{ s.label_count }}</td>
+                <td>
+                    {% if s.is_active %}
+                    <span class="badge badge-green">当前启用</span>
+                    {% else %}
+                    <span class="badge badge-gray">历史版本</span>
+                    {% endif %}
+                </td>
+                <td>{{ s.created_at }}</td>
+                <td><a href="{{ url_for('view_scheme', scheme_id=s.id) }}" class="btn btn-sm btn-outline">查看</a></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <div class="icon">📑</div>
+        <p>暂无标签方案</p>
+        {% if current_user.is_admin() %}
+        <p><a href="{{ url_for('new_scheme') }}" class="btn btn-primary">创建第一个标签方案</a></p>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+
+<div class="card">
+    <div class="card-title">快速开始</div>
+    <div class="two-col">
+        <div>
+            <h4 style="margin-bottom:10px;">工作流程</h4>
+            <ol style="padding-left: 20px; color:#4b5563; font-size:14px;">
+                {% if current_user.is_admin() %}
+                <li>配置标签方案</li>
+                {% endif %}
+                <li>导入文本样本</li>
+                <li>导入多人标注结果</li>
+                {% if current_user.is_admin() %}
+                <li>检测标注冲突</li>
+                <li>分配复核任务</li>
+                {% endif %}
+                {% if current_user.is_reviewer() or current_user.is_admin() %}
+                <li>执行复核，确认最终标签</li>
+                {% endif %}
+                {% if current_user.is_admin() %}
+                <li>导出复核证据</li>
+                {% endif %}
+            </ol>
+        </div>
+        <div>
+            <h4 style="margin-bottom:10px;">快捷入口</h4>
+            <div style="display:flex; flex-direction:column; gap:8px;">
+                <a href="{{ url_for('samples') }}" class="btn btn-outline" style="text-align:center;">📋 样本列表</a>
+                <a href="{{ url_for('annotations') }}" class="btn btn-outline" style="text-align:center;">🏷️ 标注结果</a>
+                <a href="{{ url_for('conflicts') }}" class="btn btn-outline" style="text-align:center;">⚠️ 冲突列表</a>
+                {% if current_user.is_reviewer() or current_user.is_admin() %}
+                <a href="{{ url_for('reviews') }}" class="btn btn-outline" style="text-align:center;">🔍 我的复核</a>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

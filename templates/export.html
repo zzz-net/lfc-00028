@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}数据导出{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>数据导出</h1>
+</div>
+
+<div class="two-col">
+    <div class="card">
+        <div class="card-title">导出复核证据（CSV 格式）</div>
+        <p class="text-muted" style="margin-bottom:16px;">
+            导出包含：标签列表、所有样本的标注记录、冲突状态、最终复核结论、修订历史等完整证据链。
+        </p>
+        <form method="post" action="{{ url_for('export_evidence') }}">
+            <div class="form-group">
+                <label>选择标签方案 *</label>
+                <select name="scheme_id" class="form-control" required>
+                    <option value="">-- 请选择 --</option>
+                    {% for s in schemes %}
+                    <option value="{{ s.id }}">
+                        {{ s.name }} v{{ s.version }} ({{ s.sample_count }} 个样本)
+                        {% if s.is_active %} - 当前启用{% else %} - 历史版本{% endif %}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <button type="submit" class="btn btn-primary">📥 导出 CSV 证据</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <div class="card-title">导出完整数据（JSON 格式）</div>
+        <p class="text-muted" style="margin-bottom:16px;">
+            导出结构化 JSON 数据，包含方案定义、标签、样本、标注、冲突、复核任务等完整数据，便于程序处理。
+        </p>
+        <form method="post" action="{{ url_for('export_json') }}">
+            <div class="form-group">
+                <label>选择标签方案 *</label>
+                <select name="scheme_id" class="form-control" required>
+                    <option value="">-- 请选择 --</option>
+                    {% for s in schemes %}
+                    <option value="{{ s.id }}">
+                        {{ s.name }} v{{ s.version }} ({{ s.sample_count }} 个样本)
+                        {% if s.is_active %} - 当前启用{% else %} - 历史版本{% endif %}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <button type="submit" class="btn btn-success">📄 导出 JSON 数据</button>
+        </form>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">导出内容说明</div>
+    <div class="two-col">
+        <div>
+            <h4 style="margin-bottom:10px;">CSV 导出包含</h4>
+            <ul style="padding-left: 20px; line-height:2; font-size:14px; color:#4b5563;">
+                <li>标签方案信息（名称、版本、导出时间、操作人）</li>
+                <li>完整标签列表（键、文本、描述、颜色）</li>
+                <li>逐条标注证据（样本、标注员、标签、备注）</li>
+                <li>冲突状态与复核结论</li>
+                <li>修订历史审计记录</li>
+            </ul>
+        </div>
+        <div>
+            <h4 style="margin-bottom:10px;">可追溯性保证</h4>
+            <ul style="padding-left: 20px; line-height:2; font-size:14px; color:#4b5563;">
+                <li>每条标注记录标注员和时间戳</li>
+                <li>冲突检测和分配记录操作人</li>
+                <li>复核员决策和意见完整留存</li>
+                <li>所有版本标签方案独立保存</li>
+                <li>修订历史不可篡改、永久保存</li>
+            </ul>
+        </div>
+    </div>
+</div>
+{% endblock %}

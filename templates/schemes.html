@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}标签方案{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>标签方案</h1>
+    <div class="actions">
+        <a href="{{ url_for('new_scheme') }}" class="btn btn-primary">+ 新建方案</a>
+    </div>
+</div>
+
+<div class="card">
+    {% if schemes %}
+    <table>
+        <thead>
+            <tr>
+                <th>方案名称</th>
+                <th>版本</th>
+                <th>标签数</th>
+                <th>样本数</th>
+                <th>标注数</th>
+                <th>创建人</th>
+                <th>状态</th>
+                <th>创建时间</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for s in schemes %}
+            <tr>
+                <td><strong>{{ s.name }}</strong></td>
+                <td>v{{ s.version }}</td>
+                <td>{{ s.label_count }}</td>
+                <td>{{ s.sample_count }}</td>
+                <td>{{ s.annotation_count }}</td>
+                <td>{{ s.creator_name or '-' }}</td>
+                <td>
+                    {% if s.is_active %}
+                    <span class="badge badge-green">当前启用</span>
+                    {% else %}
+                    <span class="badge badge-gray">历史版本</span>
+                    {% endif %}
+                </td>
+                <td class="text-sm text-muted">{{ s.created_at }}</td>
+                <td>
+                    <a href="{{ url_for('view_scheme', scheme_id=s.id) }}" class="btn btn-sm btn-outline">查看</a>
+                    {% if s.is_active %}
+                    <a href="{{ url_for('upgrade_scheme', scheme_id=s.id) }}" class="btn btn-sm btn-warning">升级</a>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <div class="icon">📑</div>
+        <p>暂无标签方案</p>
+        <a href="{{ url_for('new_scheme') }}" class="btn btn-primary">创建标签方案</a>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

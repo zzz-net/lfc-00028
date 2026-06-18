@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}样本管理{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>样本管理</h1>
+    <div class="actions">
+        {% if current_user.is_admin() or current_user.is_annotator() %}
+        <a href="{{ url_for('import_samples') }}" class="btn btn-primary">+ 导入样本</a>
+        {% endif %}
+    </div>
+</div>
+
+<div class="filter-bar">
+    <form method="get" class="flex gap-2 items-end">
+        <div class="form-group">
+            <label>标签方案</label>
+            <select name="scheme_id" class="form-control">
+                <option value="">全部</option>
+                {% for s in schemes %}
+                <option value="{{ s.id }}" {% if scheme_filter|string == s.id|string %}selected{% endif %}>
+                    {{ s.name }} v{{ s.version }}{% if s.is_active %} (当前){% endif %}
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="form-group">
+            <label>关键词</label>
+            <input type="text" name="keyword" class="form-control" value="{{ keyword }}" placeholder="搜索样本编号或内容">
+        </div>
+        <button type="submit" class="btn btn-primary">筛选</button>
+        <a href="{{ url_for('samples') }}" class="btn btn-outline">重置</a>
+    </form>
+</div>
+
+<div class="card">
+    {% if samples %}
+    <table>
+        <thead>
+            <tr>
+                <th>样本编号</th>
+                <th>内容</th>
+                <th>所属方案</th>
+                <th>标注数</th>
+                <th>导入时间</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for s in samples %}
+            <tr>
+                <td><code>{{ s.sample_id }}</code></td>
+                <td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ s.content }}</td>
+                <td>{{ s.scheme_name or '-' }} v{{ s.scheme_version or '-' }}</td>
+                <td>
+                    {% if s.annotation_count > 0 %}
+                    <span class="badge badge-blue">{{ s.annotation_count }}</span>
+                    {% else %}
+                    <span class="badge badge-gray">0</span>
+                    {% endif %}
+                </td>
+                <td class="text-sm text-muted">{{ s.imported_at }}</td>
+                <td><a href="{{ url_for('view_sample', sample_id=s.id) }}" class="btn btn-sm btn-outline">查看</a></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <div class="icon">📋</div>
+        <p>暂无样本数据</p>
+        {% if current_user.is_admin() or current_user.is_annotator() %}
+        <a href="{{ url_for('import_samples') }}" class="btn btn-primary">导入样本</a>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

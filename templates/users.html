@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}用户管理{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>用户管理</h1>
+    <div class="actions">
+        <a href="{{ url_for('new_user') }}" class="btn btn-primary">+ 新增用户</a>
+    </div>
+</div>
+
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>用户名</th>
+                <th>显示名</th>
+                <th>角色</th>
+                <th>标注数</th>
+                <th>复核数</th>
+                <th>创建时间</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for u in users %}
+            <tr>
+                <td>{{ u.id }}</td>
+                <td><code>{{ u.username }}</code></td>
+                <td>{{ u.display_name }}</td>
+                <td>
+                    {% if u.role == 'admin' %}<span class="badge badge-red">管理员</span>
+                    {% elif u.role == 'reviewer' %}<span class="badge badge-purple">复核员</span>
+                    {% else %}<span class="badge badge-blue">标注员</span>{% endif %}
+                </td>
+                <td>{{ u.annotation_count }}</td>
+                <td>{{ u.review_count }}</td>
+                <td class="text-sm text-muted">{{ u.created_at }}</td>
+                <td>
+                    <a href="{{ url_for('edit_user', user_id=u.id) }}" class="btn btn-sm btn-outline">编辑</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

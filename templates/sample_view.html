@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}样本详情 - {{ sample.sample_id }}{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>样本详情：<code>{{ sample.sample_id }}</code></h1>
+    <a href="{{ url_for('samples') }}" class="btn btn-outline">← 返回列表</a>
+</div>
+
+<div class="card">
+    <div class="card-title">基本信息</div>
+    <div class="two-col">
+        <div>
+            <p><strong>所属方案：</strong>{{ sample.scheme_name or '-' }} v{{ sample.scheme_version or '-' }}</p>
+            <p><strong>导入时间：</strong>{{ sample.imported_at }}</p>
+        </div>
+        <div>
+            <p><strong>标注数量：</strong>{{ annotations|length }}</p>
+            <p><strong>冲突记录：</strong>{{ conflicts|length }}</p>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">样本内容</div>
+    <div class="sample-content">{{ sample.content }}</div>
+</div>
+
+<div class="card">
+    <div class="card-title">标注意见（{{ annotations|length }} 条）</div>
+    {% if annotations %}
+        {% for a in annotations %}
+        <div class="annotation-block">
+            <div class="meta">
+                <span><strong>{{ a.annotator_name }}</strong> 标注</span>
+                <span class="text-sm text-muted">{{ a.created_at }}</span>
+            </div>
+            <div style="margin: 8px 0;">
+                {% if a.is_unknown_label %}
+                <span class="badge badge-red">标签：{{ a.label_text }}（未知标签！）</span>
+                {% else %}
+                <span class="badge badge-blue">标签：{{ a.label_text }}</span>
+                {% endif %}
+            </div>
+            {% if a.comment %}
+            <div class="content"><strong>备注：</strong>{{ a.comment }}</div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    {% else %}
+    <p class="text-muted">暂无标注</p>
+    {% endif %}
+</div>
+
+{% if conflicts %}
+<div class="card">
+    <div class="card-title">冲突与复核记录</div>
+    {% for c in conflicts %}
+    <div class="annotation-block">
+        <div class="meta">
+            <span>
+                <strong>
+                    {% if c.status == 'open' %}<span class="badge badge-red">待分配</span>
+                    {% elif c.status == 'assigned' %}<span class="badge badge-yellow">复核中</span>
+                    {% elif c.status == 'resolved' %}<span class="badge badge-green">已解决</span>
+                    {% else %}<span class="badge badge-gray">{{ c.status }}</span>{% endif %}
+                </strong>
+            </span>
+            <span class="text-sm text-muted">检测于 {{ c.detected_at }}</span>
+        </div>
+        {% if c.review_status %}
+        <div style="margin:8px 0;">
+            <span class="text-sm">复核员：{{ c.reviewer_name or '-' }} / 状态：{{ c.review_status }}</span>
+        </div>
+        {% endif %}
+        {% if c.final_label_text %}
+        <div class="content">
+            <strong>最终标签：</strong>
+            <span class="badge badge-green">{{ c.final_label_text }}</span>
+            {% if c.resolution_note %}
+            <p style="margin-top:8px;"><strong>复核意见：</strong>{{ c.resolution_note }}</p>
+            {% endif %}
+        </div>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+{% if history %}
+<div class="card">
+    <div class="card-title">修订历史</div>
+    {% for h in history %}
+    <div class="history-item">
+        <span class="time">{{ h.created_at }}</span>
+        <span class="action" style="margin-left:12px;">{{ h.action }}</span>
+        <span style="margin-left:12px;">
+            {% if h.user_name %}by {{ h.user_name }}{% endif %}
+        </span>
+        {% if h.comment %}
+        <div style="color:#6b7280; margin-top:4px;">{{ h.comment }}</div>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

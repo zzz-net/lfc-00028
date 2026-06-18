@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block title %}冲突详情 #{{ conflict.id }}{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>冲突详情 #{{ conflict.id }}
+        {% if conflict.status == 'open' %}<span class="badge badge-red">待分配</span>
+        {% elif conflict.status == 'assigned' %}<span class="badge badge-yellow">复核中</span>
+        {% elif conflict.status == 'resolved' %}<span class="badge badge-green">已解决</span>
+        {% endif %}
+    </h1>
+    <a href="{{ url_for('conflicts') }}" class="btn btn-outline">← 返回列表</a>
+</div>
+
+<div class="card">
+    <div class="card-title">样本内容</div>
+    <p style="margin-bottom:8px;"><strong>样本编号：</strong><code>{{ conflict.sample_id }}</code></p>
+    <p style="margin-bottom:8px;"><strong>所属方案：</strong>{{ conflict.scheme_name }} v{{ conflict.scheme_version }}</p>
+    <div class="sample-content">{{ conflict.content }}</div>
+</div>
+
+<div class="card">
+    <div class="card-title">各方标注意见（{{ conflict_annotations|length }} 条）</div>
+    {% for a in conflict_annotations %}
+    <div class="annotation-block">
+        <div class="meta">
+            <span><strong>{{ a.annotator_name }}</strong> 的标注</span>
+            <span class="text-sm text-muted">{{ a.created_at }}</span>
+        </div>
+        <div style="margin:8px 0;">
+            {% if a.is_unknown_label %}
+            <span class="badge badge-red">标签：{{ a.label_text }}（未知标签！）</span>
+            {% else %}
+            <span class="badge badge-blue" style="font-size:14px;padding:4px 12px;">标签：{{ a.label_text }}</span>
+            {% endif %}
+        </div>
+        {% if a.comment %}
+        <div class="content"><strong>意见说明：</strong>{{ a.comment }}</div>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>
+
+{% if current_user.is_admin() and conflict.status != 'resolved' %}
+<div class="card">
+    <div class="card-title">分配复核任务</div>
+    <form method="post" action="{{ url_for('assign_review', conflict_id=conflict.id) }}" class="flex gap-2 items-end">
+        <div class="form-group" style="flex:1; margin-bottom:0;">
+            <label>选择复核员</label>
+            <select name="reviewer_id" class="form-control" required>
+                <option value="">-- 请选择复核员 --</option>
+                {% set annotator_ids = conflict_annotations | map(attribute='annotator_id') | list %}
+                {% for r in reviewers %}
+                <option value="{{ r.id }}" {% if r.id in annotator_ids %}disabled{% endif %}>
+                    {{ r.display_name }} ({{ r.username }})
+                    {% if r.id in annotator_ids %} - 不能选（参与标注）{% endif %}
+                </option>
+                {% endfor %}
+            </select>
+            <small class="text-muted">⚠️ 参与该样本标注的复核员已禁用，不能复核自己参与标注的样本</small>
+        </div>
+        <button type="submit" class="btn btn-primary">分配复核</button>
+    </form>
+</div>
+{% endif %}
+
+{% if review_tasks %}
+<div class="card">
+    <div class="card-title">复核任务记录</div>
+    <table>
+        <thead>
+            <tr><th>复核员</th><th>状态</th><th>分配人</th><th>分配时间</th><th>复核意见</th><th>决策标签</th><th>复核时间</th></tr>
+        </thead>
+        <tbody>
+            {% for rt in review_tasks %}
+            <tr>
+                <td>{{ rt.reviewer_name }}</td>
+                <td>
+                    {% if rt.status == 'pending' %}<span class="badge badge-yellow">待处理</span>
+                    {% elif rt.status == 'in_progress' %}<span class="badge badge-blue">进行中</span>
+                    {% elif rt.status == 'reviewed' %}<span class="badge badge-green">已完成</span>
+                    {% else %}<span class="badge badge-gray">{{ rt.status }}</span>{% endif %}
+                </td>
+                <td>{{ rt.assigner_name or '-' }}</td>
+                <td class="text-sm text-muted">{{ rt.assigned_at }}</td>
+                <td>{{ rt.reviewer_comment or '-' }}</td>
+                <td>
+                    {% if rt.decision_label_text %}
+                    <span class="badge badge-green">{{ rt.decision_label_text }}</span>
+                    {% else %}-{% endif %}
+                </td>
+                <td class="text-sm text-muted">{{ rt.reviewed_at or '-' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% if conflict.status == 'resolved' %}
+<div class="card">
+    <div class="card-title">最终结论</div>
+    <p><strong>最终标签：</strong><span class="badge badge-green" style="font-size:14px;padding:4px 14px;">{{ conflict.final_label_text }}</span></p>
+    <p><strong>解决人：</strong>{{ conflict.resolver_name or '-' }}</p>
+    <p><strong>解决时间：</strong>{{ conflict.resolved_at }}</p>
+    {% if conflict.resolution_note %}
+    <p style="margin-top:12px;"><strong>复核意见：</strong></p>
+    <div style="background:#f0fdf4; padding:14px; border-radius:6px; border:1px solid #86efac; margin-top:8px;">
+        {{ conflict.resolution_note }}
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+
+{% if history %}
+<div class="card">
+    <div class="card-title">操作历史</div>
+    {% for h in history %}
+    <div class="history-item">
+        <span class="time">{{ h.created_at }}</span>
+        <span class="action" style="margin-left:12px;">{{ h.action }}</span>
+        {% if h.user_name %}<span style="margin-left:8px;" class="text-muted">by {{ h.user_name }}</span>{% endif %}
+        {% if h.comment %}
+        <div style="color:#4b5563; margin-top:4px;">{{ h.comment }}</div>
+        {% endif %}
+        {% if h.old_value or h.new_value %}
+        <div style="font-size:12px; color:#6b7280; margin-top:4px;">
+            {% if h.old_value %}旧值: {{ h.old_value }}{% endif %}
+            {% if h.old_value and h.new_value %} → {% endif %}
+            {% if h.new_value %}新值: {{ h.new_value }}{% endif %}
+        </div>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

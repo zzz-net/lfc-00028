@@ -1,0 +1,17 @@
+sample_id,label,comment
+S001,positive,拍照出色，满意，正面
+S002,negative,物流慢、客服差，确实负面
+S003,positive,商品没问题就是好评，包装小问题可以忽略
+S004,very_negative,闪退属于严重问题，比普通负面更严重
+S005,positive,续航给力，正面评价
+S006,positive,耐心解答，五星好评
+S007,negative,产品质量问题且售后差
+S008,positive,界面美观操作流畅，很好
+S009,negative,价格偏贵就是负面评价
+S010,positive,推荐购买，正面
+S011,positive,屏幕好是主要卖点，音质不算大问题
+S012,very_negative,强烈不推荐，极其负面
+S013,positive,节省时间，非常实用
+S014,positive,发货快包装好
+S015,negative,一般般在很多场景下是负面表达
+S016,unknown_label,广告问题暂时不知道归哪类

@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}冲突管理{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>冲突管理</h1>
+    {% if current_user.is_admin() %}
+    <div class="actions">
+        <form method="post" action="{{ url_for('detect_conflicts') }}" class="flex gap-2">
+            <select name="scheme_id" class="form-control" required style="width:240px;">
+                <option value="">选择方案检测冲突</option>
+                {% for s in schemes %}
+                <option value="{{ s.id }}">{{ s.name }} v{{ s.version }}</option>
+                {% endfor %}
+            </select>
+            <button type="submit" class="btn btn-warning">🔍 检测冲突</button>
+        </form>
+    </div>
+    {% endif %}
+</div>
+
+<div class="filter-bar">
+    <form method="get" class="flex gap-2 items-end">
+        <div class="form-group">
+            <label>标签方案</label>
+            <select name="scheme_id" class="form-control">
+                <option value="">全部</option>
+                {% for s in schemes %}
+                <option value="{{ s.id }}" {% if scheme_filter|string == s.id|string %}selected{% endif %}>
+                    {{ s.name }} v{{ s.version }}
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="form-group">
+            <label>状态</label>
+            <select name="status" class="form-control">
+                <option value="">全部</option>
+                <option value="open" {% if status_filter == 'open' %}selected{% endif %}>待分配</option>
+                <option value="assigned" {% if status_filter == 'assigned' %}selected{% endif %}>复核中</option>
+                <option value="resolved" {% if status_filter == 'resolved' %}selected{% endif %}>已解决</option>
+            </select>
+        </div>
+        <button type="submit" class="btn btn-primary">筛选</button>
+        <a href="{{ url_for('conflicts') }}" class="btn btn-outline">重置</a>
+    </form>
+</div>
+
+<div class="card">
+    {% if conflicts %}
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>样本编号</th>
+                <th>内容</th>
+                <th>方案</th>
+                <th>分歧方数</th>
+                <th>状态</th>
+                <th>最终标签</th>
+                <th>解决人</th>
+                <th>检测时间</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for c in conflicts %}
+            <tr>
+                <td>#{{ c.id }}</td>
+                <td><code>{{ c.sample_id }}</code></td>
+                <td style="max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ c.content }}</td>
+                <td class="text-sm">{{ c.scheme_name }} v{{ c.scheme_version }}</td>
+                <td><span class="badge badge-yellow">{{ c.party_count }} 方</span></td>
+                <td>
+                    {% if c.status == 'open' %}<span class="badge badge-red">待分配</span>
+                    {% elif c.status == 'assigned' %}<span class="badge badge-yellow">复核中</span>
+                    {% elif c.status == 'resolved' %}<span class="badge badge-green">已解决</span>
+                    {% else %}<span class="badge badge-gray">{{ c.status }}</span>{% endif %}
+                </td>
+                <td>
+                    {% if c.final_label_text %}
+                    <span class="badge badge-green">{{ c.final_label_text }}</span>
+                    {% else %}-{% endif %}
+                </td>
+                <td class="text-sm text-muted">{{ c.resolver_name or '-' }}</td>
+                <td class="text-sm text-muted">{{ c.detected_at }}</td>
+                <td><a href="{{ url_for('view_conflict', conflict_id=c.id) }}" class="btn btn-sm btn-outline">详情</a></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <div class="icon">⚠️</div>
+        <p>暂无冲突记录</p>
+        {% if current_user.is_admin() %}
+        <p class="text-sm">选择上方方案，点击"检测冲突"开始分析标注分歧</p>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

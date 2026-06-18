@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}修订历史{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>修订历史</h1>
+</div>
+
+<div class="filter-bar">
+    <form method="get" class="flex gap-2 items-end">
+        <div class="form-group">
+            <label>实体类型</label>
+            <select name="entity_type" class="form-control">
+                <option value="">全部</option>
+                <option value="user" {% if entity_type == 'user' %}selected{% endif %}>用户</option>
+                <option value="label_scheme" {% if entity_type == 'label_scheme' %}selected{% endif %}>标签方案</option>
+                <option value="sample" {% if entity_type == 'sample' %}selected{% endif %}>样本</option>
+                <option value="samples" {% if entity_type == 'samples' %}selected{% endif %}>样本导入</option>
+                <option value="annotation" {% if entity_type == 'annotation' %}selected{% endif %}>标注</option>
+                <option value="conflict" {% if entity_type == 'conflict' %}selected{% endif %}>冲突</option>
+                <option value="review_task" {% if entity_type == 'review_task' %}selected{% endif %}>复核任务</option>
+            </select>
+        </div>
+        <button type="submit" class="btn btn-primary">筛选</button>
+        <a href="{{ url_for('history') }}" class="btn btn-outline">重置</a>
+    </form>
+</div>
+
+<div class="card">
+    {% if history %}
+    <table>
+        <thead>
+            <tr>
+                <th>时间</th>
+                <th>操作人</th>
+                <th>实体类型</th>
+                <th>实体ID</th>
+                <th>操作</th>
+                <th>旧值</th>
+                <th>新值</th>
+                <th>备注</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for h in history %}
+            <tr>
+                <td class="text-sm text-muted">{{ h.created_at }}</td>
+                <td>{{ h.user_name or '-' }}</td>
+                <td><span class="badge badge-blue">{{ h.entity_type }}</span></td>
+                <td>#{{ h.entity_id }}</td>
+                <td><strong>{{ h.action }}</strong></td>
+                <td class="text-sm" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ h.old_value or '-' }}</td>
+                <td class="text-sm" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ h.new_value or '-' }}</td>
+                <td class="text-sm text-muted" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ h.comment or '-' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <div class="icon">📜</div>
+        <p>暂无修订记录</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

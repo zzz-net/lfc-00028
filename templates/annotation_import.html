@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}导入标注结果{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>导入标注结果</h1>
+    <a href="{{ url_for('annotations') }}" class="btn btn-outline">← 返回</a>
+</div>
+
+<div class="two-col">
+    <div class="card">
+        <div class="card-title">上传标注文件</div>
+        <form method="post" enctype="multipart/form-data">
+            <div class="form-group">
+                <label>选择标签方案 *</label>
+                <select name="scheme_id" class="form-control" required>
+                <option value="">-- 请选择 --</option>
+                {% for s in schemes %}
+                <option value="{{ s.id }}">{{ s.name }} v{{ s.version }}{% if s.is_active %} (当前启用){% endif %}</option>
+                {% endfor %}
+                </select>
+                <small class="text-muted">系统会校验标签是否存在于该方案中，未知标签会被标记</small>
+            </div>
+            {% if current_user.is_admin() %}
+            <div class="form-group">
+                <label>标注员 *</label>
+                <select name="annotator_id" class="form-control" required>
+                {% for u in users %}
+                <option value="{{ u.id }}">{{ u.display_name }} ({{ u.username }})</option>
+                {% endfor %}
+                </select>
+            </div>
+            {% else %}
+            <div class="form-group">
+                <label>标注员</label>
+                <input type="text" class="form-control" value="{{ current_user.display_name }}" disabled>
+                <small class="text-muted">标注员只能导入自己的标注</small>
+            </div>
+            {% endif %}
+            <div class="form-group">
+                <label>CSV 文件 *</label>
+                <input type="file" name="file" accept=".csv" class="form-control" required>
+            </div>
+            <button type="submit" class="btn btn-primary">开始导入</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <div class="card-title">CSV 格式说明</div>
+        <p style="font-size:14px; color:#4b5563; margin-bottom:12px;">
+            CSV 文件需包含以下列：
+        </p>
+        <ul style="padding-left:20px; font-size:14px; line-height:2;">
+            <li><code>sample_id</code> / <code>id</code> - 样本编号（需已存在）</li>
+            <li><code>label</code> / <code>label_key</code> - 标签键或标签文本</li>
+            <li><code>label_text</code> - 标签文本（可选，优先匹配 label）</li>
+            <li><code>comment</code> / <code>note</code> - 标注备注（可选）</li>
+        </ul>
+        <div style="margin-top:16px; padding:12px; background:#f9fafb; border-radius:6px;">
+            <p style="font-size:13px; font-family:monospace;">
+sample_id,label,comment<br>
+S001,positive,表达了明显的正面情绪<br>
+S002,negative,用户有较强抱怨
+            </p>
+        </div>
+        <div class="mt-4">
+            <div class="flash flash-warning" style="font-size:13px;">
+                ⚠️ 系统会自动检测：<br>
+                1. <strong>未知标签</strong>：若标签不在方案中，会标记为未知标签<br>
+                2. <strong>缺失样本</strong>：若样本编号不存在，会跳过该条<br>
+                3. <strong>重复标注</strong>：同标注员对同样本的重复标注会更新而非新增
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

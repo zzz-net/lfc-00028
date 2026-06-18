@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}复核任务{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>复核任务</h1>
+</div>
+
+<div class="filter-bar">
+    <form method="get" class="flex gap-2 items-end">
+        <div class="form-group">
+            <label>状态</label>
+            <select name="status" class="form-control">
+                <option value="">全部</option>
+                <option value="pending" {% if status_filter == 'pending' %}selected{% endif %}>待处理</option>
+                <option value="in_progress" {% if status_filter == 'in_progress' %}selected{% endif %}>进行中</option>
+                <option value="reviewed" {% if status_filter == 'reviewed' %}selected{% endif %}>已完成</option>
+            </select>
+        </div>
+        <button type="submit" class="btn btn-primary">筛选</button>
+        <a href="{{ url_for('reviews') }}" class="btn btn-outline">重置</a>
+    </form>
+</div>
+
+<div class="card">
+    {% if reviews %}
+    <table>
+        <thead>
+            <tr>
+                <th>任务ID</th>
+                <th>样本编号</th>
+                <th>内容</th>
+                <th>方案</th>
+                <th>分配人</th>
+                <th>分配时间</th>
+                <th>状态</th>
+                <th>决策标签</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for rt in reviews %}
+            <tr>
+                <td>#{{ rt.id }}</td>
+                <td><code>{{ rt.conflict_sample_id }}</code></td>
+                <td style="max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ rt.content }}</td>
+                <td class="text-sm">{{ rt.scheme_name }} v{{ rt.scheme_version }}</td>
+                <td class="text-sm">{{ rt.assigner_name or '-' }}</td>
+                <td class="text-sm text-muted">{{ rt.assigned_at }}</td>
+                <td>
+                    {% if rt.status == 'pending' %}<span class="badge badge-yellow">待处理</span>
+                    {% elif rt.status == 'in_progress' %}<span class="badge badge-blue">进行中</span>
+                    {% elif rt.status == 'reviewed' %}<span class="badge badge-green">已完成</span>
+                    {% else %}<span class="badge badge-gray">{{ rt.status }}</span>{% endif %}
+                </td>
+                <td>
+                    {% if rt.decision_label_text %}
+                    <span class="badge badge-green">{{ rt.decision_label_text }}</span>
+                    {% else %}-{% endif %}
+                </td>
+                <td>
+                    {% if rt.status != 'reviewed' %}
+                    <a href="{{ url_for('do_review', task_id=rt.id) }}" class="btn btn-sm btn-primary">去复核</a>
+                    {% else %}
+                    <a href="{{ url_for('do_review', task_id=rt.id) }}" class="btn btn-sm btn-outline">查看</a>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <div class="icon">🔍</div>
+        <p>暂无复核任务</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

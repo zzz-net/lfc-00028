@@ -1,0 +1,17 @@
+sample_id,label,comment
+S001,positive,用户明确表达了满意和赞赏
+S002,negative,提到物流慢和客服态度不好，负面情绪明显
+S003,neutral,既提到了优点也提到了小缺点，整体中性
+S004,negative,闪退、体验差等明显负面词汇
+S005,positive,电池续航强是明确的正面评价
+S006,positive,给出五星好评，正面
+S007,negative,产品损坏、退货被拒，强烈负面
+S008,positive,简洁美观、操作流畅，正面
+S009,neutral,提到性价比一般，中性偏负但整体中性
+S010,positive,推荐购买，明确正面
+S011,neutral,有褒有贬，屏幕好但音质一般
+S012,negative,垃圾、千万别买，强烈负面
+S013,positive,节省大量时间，实用工具，正面
+S014,positive,发货快，包装好，正面
+S015,neutral,没有惊喜没有失望，典型中性
+S016,negative,广告多影响体验，负面

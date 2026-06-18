@@ -202,7 +202,11 @@ def _import_annotations(conn, filepath, scheme_id, annotator_id):
         imported = 0
         unknown = 0
         missing = 0
+        unknown_details = []
+        missing_details = []
+        line_no = 1
         for row in reader:
+            line_no += 1
             sid = (row.get('sample_id') or row.get('id') or '').strip()
             label_key = (row.get('label') or row.get('label_key') or '').strip()
             label_text = (row.get('label_text') or '').strip()
@@ -213,21 +217,18 @@ def _import_annotations(conn, filepath, scheme_id, annotator_id):
             sample = conn.execute("SELECT id FROM samples WHERE sample_id = ?", (sid,)).fetchone()
             if not sample:
                 missing += 1
+                missing_details.append(f"{sid}(L{line_no})")
                 continue
 
             matched = label_map.get(label_key) or label_map.get(label_text)
-            is_unknown = 0
-            lbl_id = None
-            final_key = label_key
-            final_text = label_text or label_key
-
-            if matched:
-                lbl_id = matched['id']
-                final_key = matched['label_key']
-                final_text = matched['label_text']
-            else:
-                is_unknown = 1
+            if not matched:
                 unknown += 1
+                unknown_details.append(f"{sid}(L{line_no}:{label_key})")
+                continue
+
+            lbl_id = matched['id']
+            final_key = matched['label_key']
+            final_text = matched['label_text']
 
             existing = conn.execute(
                 "SELECT id FROM annotations WHERE sample_id = ? AND annotator_id = ? AND scheme_id = ?",
@@ -235,19 +236,28 @@ def _import_annotations(conn, filepath, scheme_id, annotator_id):
             ).fetchone()
             if existing:
                 conn.execute(
-                    "UPDATE annotations SET label_id=?, label_key=?, label_text=?, is_unknown_label=?, "
+                    "UPDATE annotations SET label_id=?, label_key=?, label_text=?, is_unknown_label=0, "
                     "comment=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                    (lbl_id, final_key, final_text, is_unknown, comment, existing['id'])
+                    (lbl_id, final_key, final_text, comment, existing['id'])
                 )
             else:
                 conn.execute(
                     "INSERT INTO annotations (sample_id, annotator_id, scheme_id, label_id, label_key, "
-                    "label_text, is_unknown_label, comment) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (sample['id'], annotator_id, scheme_id, lbl_id, final_key, final_text, is_unknown, comment)
+                    "label_text, is_unknown_label, comment) VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
+                    (sample['id'], annotator_id, scheme_id, lbl_id, final_key, final_text, comment)
                 )
             imported += 1
         conn.commit()
-        print(f"    成功导入/更新 {imported} 条，未知标签 {unknown} 个，缺失样本 {missing} 个")
+        msg = f"    成功导入/更新 {imported} 条"
+        if unknown:
+            msg += f"，未知标签跳过 {unknown} 条: {', '.join(unknown_details[:6])}"
+            if len(unknown_details) > 6:
+                msg += f"... 共{unknown}条"
+        if missing:
+            msg += f"，缺失样本跳过 {missing} 条: {', '.join(missing_details[:6])}"
+            if len(missing_details) > 6:
+                msg += f"... 共{missing}条"
+        print(msg)
 
 
 if __name__ == '__main__':

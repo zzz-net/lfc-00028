@@ -1,0 +1,5 @@
+数据库已初始化: D:\workSpace\AI__SPACE\lfc-00028\data\app.db
+启动服务: http://127.0.0.1:5000
+默认账号: admin/admin123, annotator1/anno123, reviewer1/review123
+ * Serving Flask app 'app'
+ * Debug mode: off

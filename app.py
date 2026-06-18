@@ -154,7 +154,8 @@ def new_scheme():
 
         log_revision('label_scheme', scheme_id, 'create',
                      new_value=f"{name} v{new_version}", user_id=current_user.id,
-                     comment=f"创建标签方案，含{len(labels_data)}个标签")
+                     comment=f"创建标签方案，含{len(labels_data)}个标签",
+                     conn=conn)
         conn.commit()
         conn.close()
         flash(f'标签方案 "{name}" v{new_version} 创建成功', 'success')
@@ -237,7 +238,8 @@ def upgrade_scheme(scheme_id):
                      old_value=f"{old_scheme['name']} v{old_scheme['version']}",
                      new_value=f"{name} v{new_version}",
                      user_id=current_user.id,
-                     comment=f"从旧方案升级，旧数据保留在原方案v{old_scheme['version']}，不自动迁移")
+                     comment=f"从旧方案升级，旧数据保留在原方案v{old_scheme['version']}，不自动迁移",
+                     conn=conn)
         conn.commit()
         conn.close()
         flash(f'方案已升级为 v{new_version}，旧版本数据保持独立，不会自动迁移', 'success')
@@ -329,7 +331,8 @@ def import_samples():
         log_revision('samples', scheme['id'], 'import',
                      new_value=f"导入{imported}条，重复{len(duplicates)}条，错误{len(errors)}条",
                      user_id=current_user.id,
-                     comment=f"导入样本到方案 {scheme['name']} v{scheme['version']}")
+                     comment=f"导入样本到方案 {scheme['name']} v{scheme['version']}",
+                     conn=conn)
         conn.commit()
         conn.close()
 
@@ -468,6 +471,7 @@ def import_annotations():
         unknown_labels = []
         missing_samples = []
         errors = []
+        skipped_duplicates = 0
 
         for i, row in enumerate(reader, start=2):
             sample_id = (row.get('sample_id') or row.get('id') or '').strip()
@@ -481,22 +485,17 @@ def import_annotations():
 
             sample = conn.execute("SELECT id FROM samples WHERE sample_id = ?", (sample_id,)).fetchone()
             if not sample:
-                missing_samples.append(sample_id)
+                missing_samples.append((sample_id, i))
                 continue
 
             matched_label = label_map.get(label_key) or label_map.get(label_text)
-            is_unknown = 0
-            final_label_id = None
-            final_label_key = label_key
-            final_label_text = label_text or label_key
+            if not matched_label:
+                unknown_labels.append((sample_id, label_key, i))
+                continue
 
-            if matched_label:
-                final_label_id = matched_label['id']
-                final_label_key = matched_label['label_key']
-                final_label_text = matched_label['label_text']
-            else:
-                is_unknown = 1
-                unknown_labels.append(label_key)
+            final_label_id = matched_label['id']
+            final_label_key = matched_label['label_key']
+            final_label_text = matched_label['label_text']
 
             existing = conn.execute(
                 "SELECT id FROM annotations WHERE sample_id = ? AND annotator_id = ? AND scheme_id = ?",
@@ -505,35 +504,44 @@ def import_annotations():
 
             if existing:
                 conn.execute(
-                    "UPDATE annotations SET label_id=?, label_key=?, label_text=?, is_unknown_label=?, "
+                    "UPDATE annotations SET label_id=?, label_key=?, label_text=?, is_unknown_label=0, "
                     "comment=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                    (final_label_id, final_label_key, final_label_text, is_unknown, comment, existing['id'])
+                    (final_label_id, final_label_key, final_label_text, comment, existing['id'])
                 )
                 log_revision('annotation', existing['id'], 'update',
-                             user_id=current_user.id, comment=f"更新标注 {sample_id}")
+                             user_id=current_user.id, comment=f"更新标注 {sample_id}",
+                             conn=conn)
             else:
                 cursor = conn.execute(
                     "INSERT INTO annotations (sample_id, annotator_id, scheme_id, label_id, label_key, "
-                    "label_text, is_unknown_label, comment) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "label_text, is_unknown_label, comment) VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
                     (sample['id'], int(annotator_id), scheme['id'], final_label_id,
-                     final_label_key, final_label_text, is_unknown, comment)
+                     final_label_key, final_label_text, comment)
                 )
                 log_revision('annotation', cursor.lastrowid, 'create',
-                             user_id=current_user.id, comment=f"新增标注 {sample_id}")
+                             user_id=current_user.id, comment=f"新增标注 {sample_id}",
+                             conn=conn)
             imported += 1
 
         conn.commit()
         conn.close()
 
-        msg = f'成功导入/更新 {imported} 条标注'
+        parts = []
+        if imported > 0:
+            parts.append(f'成功导入/更新 {imported} 条标注')
         if unknown_labels:
-            msg += f'，未知标签 {len(set(unknown_labels))} 个: {", ".join(set(unknown_labels[:5]))}'
-            if len(set(unknown_labels)) > 5:
-                msg += '...'
+            detail = ", ".join([f"{s}(L{ln}:{lb})" for s, lb, ln in unknown_labels[:8]])
+            if len(unknown_labels) > 8:
+                detail += f"... 共{len(unknown_labels)}条"
+            parts.append(f'未知标签被跳过 {len(unknown_labels)} 条: {detail}')
         if missing_samples:
-            msg += f'，缺失样本 {len(set(missing_samples))} 个'
+            detail = ", ".join([f"{s}(L{ln})" for s, ln in missing_samples[:8]])
+            if len(missing_samples) > 8:
+                detail += f"... 共{len(missing_samples)}条"
+            parts.append(f'缺失样本被跳过 {len(missing_samples)} 条: {detail}')
         if errors:
-            msg += f'，错误 {len(errors)} 条'
+            parts.append(f'其他错误 {len(errors)} 条')
+        msg = '；'.join(parts) if parts else '没有合法的标注行被导入'
         flash(msg, 'success' if imported > 0 else 'warning')
         return redirect(url_for('annotations'))
 
@@ -629,7 +637,8 @@ def detect_conflicts():
                 (conflict_id, a['id'])
             )
         log_revision('conflict', conflict_id, 'detect',
-                     user_id=current_user.id, comment=f"检测到样本冲突")
+                     user_id=current_user.id, comment=f"检测到样本冲突",
+                     conn=conn)
         new_conflicts += 1
 
     conn.commit()
@@ -730,7 +739,8 @@ def assign_review(conflict_id):
     conn.execute("UPDATE conflicts SET status = 'assigned' WHERE id = ?", (conflict_id,))
     log_revision('conflict', conflict_id, 'assign_review',
                  new_value=f"分配给复核员 #{reviewer_id}",
-                 user_id=current_user.id, comment=f"分配复核任务给 {reviewer['display_name']}")
+                 user_id=current_user.id, comment=f"分配复核任务给 {reviewer['display_name']}",
+                 conn=conn)
     conn.commit()
     conn.close()
     flash(f'已分配给 {reviewer["display_name"]}', 'success')
@@ -829,10 +839,12 @@ def do_review(task_id):
         )
         log_revision('conflict', task['conflict_id'], 'resolve',
                      new_value=f"最终标签: {label['label_text']}",
-                     user_id=current_user.id, comment=reviewer_comment or "复核完成")
+                     user_id=current_user.id, comment=reviewer_comment or "复核完成",
+                     conn=conn)
         log_revision('review_task', task_id, 'complete',
                      new_value=f"决策: {label['label_text']}",
-                     user_id=current_user.id, comment=reviewer_comment)
+                     user_id=current_user.id, comment=reviewer_comment,
+                     conn=conn)
         conn.commit()
         conn.close()
         flash('复核完成', 'success')
@@ -884,7 +896,8 @@ def new_user():
                 (username, generate_password_hash(password), role, display_name or username)
             )
             log_revision('user', cursor.lastrowid, 'create',
-                         new_value=f"{username} ({role})", user_id=current_user.id)
+                         new_value=f"{username} ({role})", user_id=current_user.id,
+                         conn=conn)
             conn.commit()
             flash('用户创建成功', 'success')
             conn.close()
@@ -933,7 +946,8 @@ def edit_user(user_id):
         log_revision('user', user_id, 'update',
                      old_value=old_value,
                      new_value=f"{display_name or user['username']} ({role})",
-                     user_id=current_user.id)
+                     user_id=current_user.id,
+                     conn=conn)
         conn.commit()
         conn.close()
         flash('用户更新成功', 'success')
@@ -1004,7 +1018,7 @@ def export_evidence():
         anns = conn.execute(
             "SELECT a.*, u.display_name as annotator_name FROM annotations a "
             "JOIN users u ON u.id = a.annotator_id "
-            "WHERE a.sample_id = ? AND a.scheme_id = ? ORDER BY a.created_at",
+            "WHERE a.sample_id = ? AND a.scheme_id = ? AND a.is_unknown_label = 0 ORDER BY a.created_at",
             (sample['id'], scheme_id)
         ).fetchall()
 
@@ -1100,7 +1114,8 @@ def export_json():
     for s in samples:
         anns = conn.execute(
             "SELECT a.*, u.display_name as annotator_name, u.username as annotator FROM annotations a "
-            "JOIN users u ON u.id = a.annotator_id WHERE a.sample_id = ? ORDER BY a.created_at",
+            "JOIN users u ON u.id = a.annotator_id "
+            "WHERE a.sample_id = ? AND a.is_unknown_label = 0 ORDER BY a.created_at",
             (s['id'],)
         ).fetchall()
         conflict = conn.execute(

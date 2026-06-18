@@ -179,12 +179,29 @@ class User(UserMixin):
         return None
 
 
-def log_revision(entity_type, entity_id, action, old_value=None, new_value=None, user_id=None, comment=None):
-    conn = get_db()
-    conn.execute(
-        "INSERT INTO revision_history (entity_type, entity_id, action, old_value, new_value, user_id, comment) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (entity_type, entity_id, action, str(old_value) if old_value else None,
-         str(new_value) if new_value else None, user_id, comment)
-    )
-    conn.commit()
-    conn.close()
+def log_revision(entity_type, entity_id, action, old_value=None, new_value=None, user_id=None, comment=None, conn=None):
+    """
+    记录审计日志。
+
+    关键约定：
+    - conn=None（默认）：内部新建连接，写完 commit+close，适用于"单次写、无外层事务"的场景
+    - conn 传入：复用该连接写日志，**不执行 commit 也不 close**，调用者需在最后统一 commit
+      用于事务内有多次业务写入+多次审计写入的场景，避免同一请求多连接导致 SQLite 锁
+    """
+    sql = ("INSERT INTO revision_history (entity_type, entity_id, action, old_value, new_value, user_id, comment) "
+           "VALUES (?, ?, ?, ?, ?, ?, ?)")
+    params = (entity_type, entity_id, action,
+              str(old_value) if old_value is not None else None,
+              str(new_value) if new_value is not None else None,
+              user_id, comment)
+
+    if conn is not None:
+        conn.execute(sql, params)
+        return
+
+    c = get_db()
+    try:
+        c.execute(sql, params)
+        c.commit()
+    finally:
+        c.close()

@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}导入批次{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>导入批次管理</h1>
+</div>
+
+<div class="filter-bar">
+    <div class="form-group">
+        <label>批次类型</label>
+        <select class="form-control" onchange="window.location.href='{{ url_for('batches_list') }}?type='+this.value+'&status={{ status }}'">
+            <option value="">全部</option>
+            <option value="sample" {% if batch_type == 'sample' %}selected{% endif %}>样本批次</option>
+            <option value="annotation" {% if batch_type == 'annotation' %}selected{% endif %}>标注批次</option>
+        </select>
+    </div>
+    <div class="form-group">
+        <label>状态</label>
+        <select class="form-control" onchange="window.location.href='{{ url_for('batches_list') }}?type={{ batch_type }}&status='+this.value">
+            <option value="">全部</option>
+            <option value="preview" {% if status == 'preview' %}selected{% endif %}>预演中</option>
+            <option value="confirmed" {% if status == 'confirmed' %}selected{% endif %}>已确认</option>
+            <option value="reverted" {% if status == 'reverted' %}selected{% endif %}>已撤销</option>
+        </select>
+    </div>
+</div>
+
+<div class="card">
+    {% if batches %}
+    <table>
+        <thead>
+            <tr>
+                <th>批次ID</th>
+                <th>类型</th>
+                <th>文件名</th>
+                <th>状态</th>
+                <th>操作人</th>
+                <th>创建时间</th>
+                <th>影响数量</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for b in batches %}
+            <tr>
+                <td>#{{ b.id }}</td>
+                <td>
+                    {% if b.batch_type == 'sample' %}
+                    <span class="badge badge-blue">样本</span>
+                    {% else %}
+                    <span class="badge badge-purple">标注</span>
+                    {% endif %}
+                </td>
+                <td>{{ b.file_name }}</td>
+                <td>
+                    {% if b.status == 'preview' %}
+                    <span class="badge badge-yellow">预演中</span>
+                    {% elif b.status == 'confirmed' %}
+                    <span class="badge badge-green">已确认</span>
+                    {% elif b.status == 'reverted' %}
+                    <span class="badge badge-gray">已撤销</span>
+                    {% endif %}
+                </td>
+                <td>{{ b.creator_name or '-' }}</td>
+                <td>{{ b.created_at }}</td>
+                <td>
+                    新增: {{ b.new_count }}
+                    {% if b.update_count %}
+                    / 更新: {{ b.update_count }}
+                    {% endif %}
+                </td>
+                <td>
+                    <a href="{{ url_for('batch_detail', batch_id=b.id) }}" class="btn btn-sm btn-outline">详情</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <div class="icon">📦</div>
+        <p>暂无导入批次记录</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

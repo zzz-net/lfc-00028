@@ -6,7 +6,13 @@ from datetime import datetime
 from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, Response, send_file
 from flask_login import LoginManager, login_user, login_required, logout_user, current_user
-from models import init_db, get_db, User, log_revision, DB_PATH
+from models import (init_db, get_db, User, log_revision, DB_PATH,
+                    create_batch, batch_add_sample_record, batch_add_annotation_record,
+                    batch_add_conflict_record, batch_add_review_task_record,
+                    batch_link_revision, update_batch_stats, confirm_batch,
+                    get_batch, list_batches, get_batch_sample_records,
+                    get_batch_annotation_records, get_batch_conflict_records,
+                    get_batch_review_task_records, revert_batch)
 
 app = Flask(__name__)
 app.secret_key = 'offline-annotation-review-secret-key-local-only'
@@ -1178,6 +1184,646 @@ def history():
     history_data = conn.execute(query, params).fetchall()
     conn.close()
     return render_template('history.html', history=history_data, entity_type=entity_type)
+
+
+# ============ 批次管理 ============
+
+@app.route('/batches')
+@login_required
+@role_required('admin')
+def batches_list():
+    conn = get_db()
+    batch_type = request.args.get('type', '')
+    status = request.args.get('status', '')
+    batches = list_batches(batch_type=batch_type or None, status=status or None, conn=conn)
+    conn.close()
+    return render_template('batches.html', batches=batches,
+                           batch_type=batch_type, status=status)
+
+
+@app.route('/batches/<int:batch_id>')
+@login_required
+@role_required('admin')
+def batch_detail(batch_id):
+    conn = get_db()
+    batch = get_batch(batch_id, conn=conn)
+    if not batch:
+        conn.close()
+        flash('批次不存在', 'error')
+        return redirect(url_for('batches_list'))
+
+    sample_records = []
+    annotation_records = []
+    conflict_records = []
+    review_task_records = []
+
+    if batch['batch_type'] == 'sample':
+        sample_records = get_batch_sample_records(batch_id, conn=conn)
+    elif batch['batch_type'] == 'annotation':
+        annotation_records = get_batch_annotation_records(batch_id, conn=conn)
+        conflict_records = get_batch_conflict_records(batch_id, conn=conn)
+        review_task_records = get_batch_review_task_records(batch_id, conn=conn)
+
+    creator = None
+    reverter = None
+    if batch['created_by']:
+        row = conn.execute("SELECT display_name, username FROM users WHERE id = ?",
+                          (batch['created_by'],)).fetchone()
+        if row:
+            creator = row['display_name'] or row['username']
+    if batch['reverted_by']:
+        row = conn.execute("SELECT display_name, username FROM users WHERE id = ?",
+                          (batch['reverted_by'],)).fetchone()
+        if row:
+            reverter = row['display_name'] or row['username']
+
+    conn.close()
+    return render_template('batch_detail.html',
+                           batch=batch,
+                           sample_records=sample_records,
+                           annotation_records=annotation_records,
+                           conflict_records=conflict_records,
+                           review_task_records=review_task_records,
+                           creator=creator,
+                           reverter=reverter)
+
+
+@app.route('/samples/import/preview', methods=['POST'])
+@login_required
+@role_required('admin', 'annotator')
+def preview_samples_import():
+    """样本导入预演：不真正入库，返回预演结果并创建 preview 状态的批次。"""
+    conn = get_db()
+    schemes = conn.execute("SELECT * FROM label_schemes WHERE is_active = 1 ORDER BY name, version DESC").fetchall()
+
+    scheme_id = request.form.get('scheme_id')
+    file = request.files.get('file')
+
+    if not scheme_id or not file:
+        conn.close()
+        flash('请选择标签方案和上传文件', 'error')
+        return redirect(url_for('import_samples'))
+
+    scheme = conn.execute("SELECT * FROM label_schemes WHERE id = ?", (int(scheme_id),)).fetchone()
+    if not scheme:
+        conn.close()
+        flash('标签方案不存在', 'error')
+        return redirect(url_for('import_samples'))
+
+    file_content = file.read()
+    file_size = len(file_content)
+    file_name = file.filename or 'samples.csv'
+    import hashlib
+    file_hash = hashlib.md5(file_content).hexdigest()
+
+    try:
+        content = file_content.decode('utf-8-sig')
+    except UnicodeDecodeError:
+        conn.close()
+        flash('文件编码错误，请使用 UTF-8 编码', 'error')
+        return redirect(url_for('import_samples'))
+
+    reader = csv.DictReader(io.StringIO(content))
+    rows = list(reader)
+    total_rows = len(rows)
+
+    batch_id = create_batch(
+        batch_type='sample',
+        scheme_id=scheme['id'],
+        file_name=file_name,
+        file_hash=file_hash,
+        file_size=file_size,
+        created_by=current_user.id,
+        conn=conn
+    )
+
+    new_count = 0
+    duplicates = []
+    errors = []
+    old_scheme_residue = 0
+    seen_sample_ids = set()
+
+    for i, row in enumerate(rows, start=2):
+        sample_id = (row.get('sample_id') or row.get('id') or '').strip()
+        text = (row.get('content') or row.get('text') or row.get('sample') or '').strip()
+        metadata = {k: v for k, v in row.items() if k not in ('sample_id', 'id', 'content', 'text', 'sample')}
+
+        if not sample_id or not text:
+            err = f"第{i}行: 缺少样本编号或内容"
+            errors.append(err)
+            batch_add_sample_record(
+                batch_id=batch_id, row_number=i, sample_code=sample_id or '',
+                action='skip_error', error_reason='缺少样本编号或内容',
+                new_content=text, conn=conn
+            )
+            continue
+
+        if sample_id in seen_sample_ids:
+            duplicates.append(sample_id)
+            batch_add_sample_record(
+                batch_id=batch_id, row_number=i, sample_code=sample_id,
+                action='skip_duplicate',
+                old_content='',
+                new_content=text,
+                error_reason='本批次内重复的样本编号',
+                conn=conn
+            )
+            continue
+
+        existing = conn.execute("SELECT id, scheme_id FROM samples WHERE sample_id = ?", (sample_id,)).fetchone()
+        if existing:
+            duplicates.append(sample_id)
+            batch_add_sample_record(
+                batch_id=batch_id, row_number=i, sample_code=sample_id,
+                action='skip_duplicate', sample_db_id=existing['id'],
+                old_content='',
+                new_content=text,
+                error_reason=f'样本编号已存在于方案ID {existing["scheme_id"]}',
+                conn=conn
+            )
+            if existing['scheme_id'] and existing['scheme_id'] != scheme['id']:
+                old_scheme_residue += 1
+            continue
+
+        seen_sample_ids.add(sample_id)
+        batch_add_sample_record(
+            batch_id=batch_id, row_number=i, sample_code=sample_id,
+            action='create',
+            new_content=text,
+            metadata=json.dumps(metadata, ensure_ascii=False) if metadata else None,
+            conn=conn
+        )
+        new_count += 1
+
+    stats = {
+        'total_rows': total_rows,
+        'new_count': new_count,
+        'skip_duplicate_count': len(duplicates),
+        'skip_error_count': len(errors),
+        'old_scheme_residue_count': old_scheme_residue,
+    }
+    update_batch_stats(batch_id, stats, conn=conn)
+
+    preview_data = json.dumps({
+        'scheme': {'id': scheme['id'], 'name': scheme['name'], 'version': scheme['version']},
+        'total_rows': total_rows,
+        'new_count': new_count,
+        'duplicates': duplicates,
+        'errors': errors,
+        'old_scheme_residue': old_scheme_residue,
+    }, ensure_ascii=False)
+    conn.execute("UPDATE import_batches SET preview_data = ? WHERE id = ?",
+                 (preview_data, batch_id))
+
+    conn.commit()
+    conn.close()
+
+    return redirect(url_for('batch_detail', batch_id=batch_id))
+
+
+@app.route('/annotations/import/preview', methods=['POST'])
+@login_required
+@role_required('admin', 'annotator')
+def preview_annotations_import():
+    """标注导入预演：不真正入库，返回预演结果并创建 preview 状态的批次。"""
+    conn = get_db()
+
+    scheme_id = request.form.get('scheme_id')
+    annotator_id = request.form.get('annotator_id', str(current_user.id))
+    file = request.files.get('file')
+
+    if not scheme_id or not file:
+        conn.close()
+        flash('请选择标签方案和上传文件', 'error')
+        return redirect(url_for('import_annotations'))
+
+    scheme = conn.execute("SELECT * FROM label_schemes WHERE id = ?", (int(scheme_id),)).fetchone()
+    if not scheme:
+        conn.close()
+        flash('标签方案不存在', 'error')
+        return redirect(url_for('import_annotations'))
+
+    if current_user.is_annotator() and int(annotator_id) != current_user.id:
+        conn.close()
+        flash('标注员只能导入自己的标注结果', 'error')
+        return redirect(url_for('import_annotations'))
+
+    scheme_labels = conn.execute(
+        "SELECT id, label_key, label_text FROM labels WHERE scheme_id = ?", (scheme['id'],)
+    ).fetchall()
+    label_map = {}
+    for lbl in scheme_labels:
+        label_map[lbl['label_key']] = lbl
+        label_map[lbl['label_text']] = lbl
+
+    file_content = file.read()
+    file_size = len(file_content)
+    file_name = file.filename or 'annotations.csv'
+    import hashlib
+    file_hash = hashlib.md5(file_content).hexdigest()
+
+    try:
+        content = file_content.decode('utf-8-sig')
+    except UnicodeDecodeError:
+        conn.close()
+        flash('文件编码错误，请使用 UTF-8 编码', 'error')
+        return redirect(url_for('import_annotations'))
+
+    reader = csv.DictReader(io.StringIO(content))
+    rows = list(reader)
+    total_rows = len(rows)
+
+    batch_id = create_batch(
+        batch_type='annotation',
+        scheme_id=scheme['id'],
+        file_name=file_name,
+        file_hash=file_hash,
+        file_size=file_size,
+        created_by=current_user.id,
+        conn=conn
+    )
+
+    new_count = 0
+    update_count = 0
+    unknown_labels = []
+    missing_samples = []
+    errors = []
+    potential_conflicts = []
+    old_scheme_residue = 0
+
+    for i, row in enumerate(rows, start=2):
+        sample_id = (row.get('sample_id') or row.get('id') or '').strip()
+        label_key = (row.get('label') or row.get('label_key') or '').strip()
+        label_text = (row.get('label_text') or '').strip()
+        comment = (row.get('comment') or row.get('note') or '').strip()
+
+        if not sample_id or not label_key:
+            err = f"第{i}行: 缺少样本编号或标签"
+            errors.append(err)
+            batch_add_annotation_record(
+                batch_id=batch_id, row_number=i, sample_code=sample_id or '',
+                action='skip_error', annotator_id=int(annotator_id),
+                error_reason='缺少样本编号或标签',
+                new_label_key=label_key,
+                conn=conn
+            )
+            continue
+
+        sample = conn.execute("SELECT id, scheme_id FROM samples WHERE sample_id = ?", (sample_id,)).fetchone()
+        if not sample:
+            missing_samples.append((sample_id, i))
+            batch_add_annotation_record(
+                batch_id=batch_id, row_number=i, sample_code=sample_id,
+                action='skip_missing_sample', annotator_id=int(annotator_id),
+                error_reason='样本不存在',
+                new_label_key=label_key,
+                conn=conn
+            )
+            continue
+
+        if sample['scheme_id'] and sample['scheme_id'] != scheme['id']:
+            old_scheme_residue += 1
+
+        matched_label = label_map.get(label_key) or label_map.get(label_text)
+        if not matched_label:
+            unknown_labels.append((sample_id, label_key, i))
+            batch_add_annotation_record(
+                batch_id=batch_id, row_number=i, sample_code=sample_id,
+                sample_db_id=sample['id'], action='skip_unknown_label',
+                annotator_id=int(annotator_id),
+                new_label_key=label_key,
+                error_reason=f'未知标签: {label_key}',
+                conn=conn
+            )
+            continue
+
+        existing = conn.execute(
+            "SELECT * FROM annotations WHERE sample_id = ? AND annotator_id = ? AND scheme_id = ?",
+            (sample['id'], int(annotator_id), scheme['id'])
+        ).fetchone()
+
+        if existing:
+            if existing['label_key'] == matched_label['label_key'] and existing['comment'] == comment:
+                batch_add_annotation_record(
+                    batch_id=batch_id, row_number=i, sample_code=sample_id,
+                    sample_db_id=sample['id'], annotation_id=existing['id'],
+                    action='skip_duplicate', annotator_id=int(annotator_id),
+                    old_label_id=existing['label_id'], old_label_key=existing['label_key'],
+                    old_label_text=existing['label_text'], old_comment=existing['comment'],
+                    new_label_id=matched_label['id'], new_label_key=matched_label['label_key'],
+                    new_label_text=matched_label['label_text'], new_comment=comment,
+                    error_reason='标注完全相同，无需更新',
+                    conn=conn
+                )
+                continue
+
+            update_count += 1
+            batch_add_annotation_record(
+                batch_id=batch_id, row_number=i, sample_code=sample_id,
+                sample_db_id=sample['id'], annotation_id=existing['id'],
+                action='update', annotator_id=int(annotator_id),
+                old_label_id=existing['label_id'], old_label_key=existing['label_key'],
+                old_label_text=existing['label_text'], old_comment=existing['comment'],
+                new_label_id=matched_label['id'], new_label_key=matched_label['label_key'],
+                new_label_text=matched_label['label_text'], new_comment=comment,
+                conn=conn
+            )
+        else:
+            new_count += 1
+            batch_add_annotation_record(
+                batch_id=batch_id, row_number=i, sample_code=sample_id,
+                sample_db_id=sample['id'], action='create',
+                annotator_id=int(annotator_id),
+                new_label_id=matched_label['id'], new_label_key=matched_label['label_key'],
+                new_label_text=matched_label['label_text'], new_comment=comment,
+                conn=conn
+            )
+
+        existing_other_anns = conn.execute(
+            "SELECT DISTINCT label_key FROM annotations "
+            "WHERE sample_id = ? AND scheme_id = ? AND annotator_id != ? AND is_unknown_label = 0",
+            (sample['id'], scheme['id'], int(annotator_id))
+        ).fetchall()
+        other_labels = [r['label_key'] for r in existing_other_anns if r['label_key']]
+        if other_labels and matched_label['label_key'] not in other_labels:
+            potential_conflicts.append(sample_id)
+
+    stats = {
+        'total_rows': total_rows,
+        'new_count': new_count,
+        'update_count': update_count,
+        'skip_duplicate_count': sum(1 for r in rows if False),
+        'skip_error_count': len(errors),
+        'skip_unknown_label_count': len(unknown_labels),
+        'skip_missing_sample_count': len(missing_samples),
+        'conflict_created_count': len(potential_conflicts),
+        'old_scheme_residue_count': old_scheme_residue,
+    }
+    update_batch_stats(batch_id, stats, conn=conn)
+
+    preview_data = json.dumps({
+        'scheme': {'id': scheme['id'], 'name': scheme['name'], 'version': scheme['version']},
+        'annotator_id': int(annotator_id),
+        'total_rows': total_rows,
+        'new_count': new_count,
+        'update_count': update_count,
+        'unknown_labels': unknown_labels,
+        'missing_samples': missing_samples,
+        'errors': errors,
+        'potential_conflicts': potential_conflicts,
+        'old_scheme_residue': old_scheme_residue,
+    }, ensure_ascii=False)
+    conn.execute("UPDATE import_batches SET preview_data = ? WHERE id = ?",
+                 (preview_data, batch_id))
+
+    conn.commit()
+    conn.close()
+
+    return redirect(url_for('batch_detail', batch_id=batch_id))
+
+
+@app.route('/batches/<int:batch_id>/confirm', methods=['POST'])
+@login_required
+@role_required('admin')
+def confirm_import_batch(batch_id):
+    """确认导入批次：将预演数据真正写入数据库。"""
+    conn = get_db()
+    batch = get_batch(batch_id, conn=conn)
+    if not batch:
+        conn.close()
+        flash('批次不存在', 'error')
+        return redirect(url_for('batches_list'))
+    if batch['status'] != 'preview':
+        conn.close()
+        flash(f'批次状态为 {batch["status"]}，无法确认导入', 'error')
+        return redirect(url_for('batch_detail', batch_id=batch_id))
+
+    try:
+        if batch['batch_type'] == 'sample':
+            _confirm_sample_batch(batch_id, conn=conn)
+        elif batch['batch_type'] == 'annotation':
+            _confirm_annotation_batch(batch_id, conn=conn)
+
+        confirm_batch(batch_id, conn=conn)
+        log_revision('import_batch', batch_id, 'confirm',
+                     old_value='preview', new_value='confirmed',
+                     user_id=current_user.id,
+                     comment=f'确认导入批次 #{batch_id}',
+                     conn=conn)
+
+        conn.commit()
+        flash('导入确认成功', 'success')
+    except Exception as e:
+        conn.rollback()
+        flash(f'导入确认失败: {e}', 'error')
+        return redirect(url_for('batch_detail', batch_id=batch_id))
+    finally:
+        conn.close()
+
+    return redirect(url_for('batch_detail', batch_id=batch_id))
+
+
+def _confirm_sample_batch(batch_id, conn=None):
+    """确认样本批次：将 create 的样本真正入库。"""
+    records = conn.execute(
+        "SELECT * FROM batch_sample_records WHERE batch_id = ? AND action = 'create'",
+        (batch_id,)
+    ).fetchall()
+
+    batch = get_batch(batch_id, conn=conn)
+
+    for rec in records:
+        cursor = conn.execute(
+            "INSERT INTO samples (sample_id, content, scheme_id, imported_by, metadata) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (rec['sample_code'], rec['new_content'], batch['scheme_id'],
+             batch['created_by'], rec['metadata'])
+        )
+        sample_id = cursor.lastrowid
+        conn.execute(
+            "UPDATE batch_sample_records SET sample_db_id = ? WHERE id = ?",
+            (sample_id, rec['id'])
+        )
+        log_revision('sample', sample_id, 'create',
+                     new_value=rec['new_content'],
+                     user_id=batch['created_by'],
+                     comment=f'批次 #{batch_id} 导入样本',
+                     conn=conn)
+        rev_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        batch_link_revision(batch_id, rev_id, conn=conn)
+
+
+def _confirm_annotation_batch(batch_id, conn=None):
+    """确认标注批次：将 create/update 的标注真正写入数据库。"""
+    batch = get_batch(batch_id, conn=conn)
+
+    create_records = conn.execute(
+        "SELECT * FROM batch_annotation_records WHERE batch_id = ? AND action = 'create'",
+        (batch_id,)
+    ).fetchall()
+
+    for rec in create_records:
+        cursor = conn.execute(
+            "INSERT INTO annotations (sample_id, annotator_id, scheme_id, label_id, label_key, "
+            "label_text, is_unknown_label, comment) VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
+            (rec['sample_db_id'], rec['annotator_id'], batch['scheme_id'],
+             rec['new_label_id'], rec['new_label_key'], rec['new_label_text'],
+             rec['new_comment'] or '')
+        )
+        ann_id = cursor.lastrowid
+        conn.execute(
+            "UPDATE batch_annotation_records SET annotation_id = ? WHERE id = ?",
+            (ann_id, rec['id'])
+        )
+        log_revision('annotation', ann_id, 'create',
+                     new_value=rec['new_label_text'],
+                     user_id=batch['created_by'],
+                     comment=f'批次 #{batch_id} 导入标注',
+                     conn=conn)
+        rev_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        batch_link_revision(batch_id, rev_id, conn=conn)
+
+    update_records = conn.execute(
+        "SELECT * FROM batch_annotation_records WHERE batch_id = ? AND action = 'update'",
+        (batch_id,)
+    ).fetchall()
+
+    for rec in update_records:
+        conn.execute(
+            "UPDATE annotations SET label_id=?, label_key=?, label_text=?, is_unknown_label=0, "
+            "comment=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (rec['new_label_id'], rec['new_label_key'], rec['new_label_text'],
+             rec['new_comment'] or '', rec['annotation_id'])
+        )
+        log_revision('annotation', rec['annotation_id'], 'update',
+                     old_value=rec['old_label_text'], new_value=rec['new_label_text'],
+                     user_id=batch['created_by'],
+                     comment=f'批次 #{batch_id} 更新标注',
+                     conn=conn)
+        rev_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        batch_link_revision(batch_id, rev_id, conn=conn)
+
+    _detect_batch_conflicts(batch_id, conn=conn)
+
+
+def _detect_batch_conflicts(batch_id, conn=None):
+    """检测批次导入后可能产生的冲突，并记录到批次明细。"""
+    batch = get_batch(batch_id, conn=conn)
+    if not batch or batch['scheme_id'] is None:
+        return
+
+    sample_ids = conn.execute(
+        "SELECT DISTINCT sample_db_id FROM batch_annotation_records "
+        "WHERE batch_id = ? AND action IN ('create', 'update') AND sample_db_id IS NOT NULL",
+        (batch_id,)
+    ).fetchall()
+
+    created_count = 0
+    affected_count = 0
+
+    for s_row in sample_ids:
+        sample_id = s_row['sample_db_id']
+        if not sample_id:
+            continue
+
+        labels = conn.execute(
+            "SELECT DISTINCT label_key FROM annotations "
+            "WHERE sample_id = ? AND scheme_id = ? AND is_unknown_label = 0 AND label_key IS NOT NULL",
+            (sample_id, batch['scheme_id'])
+        ).fetchall()
+        label_keys = [l['label_key'] for l in labels if l['label_key']]
+
+        if len(set(label_keys)) <= 1:
+            continue
+
+        existing_conflict = conn.execute(
+            "SELECT * FROM conflicts WHERE sample_id = ? AND scheme_id = ? AND status != 'resolved'",
+            (sample_id, batch['scheme_id'])
+        ).fetchone()
+
+        if existing_conflict:
+            old_status = existing_conflict['status']
+            batch_add_conflict_record(
+                batch_id=batch_id, conflict_id=existing_conflict['id'],
+                sample_db_id=sample_id, action='affected',
+                old_status=old_status, new_status=old_status,
+                conn=conn
+            )
+            affected_count += 1
+        else:
+            cursor = conn.execute(
+                "INSERT INTO conflicts (sample_id, scheme_id, status) VALUES (?, ?, 'open')",
+                (sample_id, batch['scheme_id'])
+            )
+            conflict_id = cursor.lastrowid
+
+            anns = conn.execute(
+                "SELECT id FROM annotations WHERE sample_id = ? AND scheme_id = ?",
+                (sample_id, batch['scheme_id'])
+            ).fetchall()
+            for a in anns:
+                conn.execute(
+                    "INSERT INTO conflict_annotations (conflict_id, annotation_id) VALUES (?, ?)",
+                    (conflict_id, a['id'])
+                )
+
+            batch_add_conflict_record(
+                batch_id=batch_id, conflict_id=conflict_id,
+                sample_db_id=sample_id, action='created',
+                old_status=None, new_status='open',
+                conn=conn
+            )
+            log_revision('conflict', conflict_id, 'detect',
+                         user_id=batch['created_by'],
+                         comment=f'批次 #{batch_id} 导入后检测到冲突',
+                         conn=conn)
+            rev_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            batch_link_revision(batch_id, rev_id, conn=conn)
+            created_count += 1
+
+    update_batch_stats(batch_id, {
+        'conflict_created_count': created_count,
+        'conflict_affected_count': affected_count,
+    }, conn=conn)
+
+
+@app.route('/batches/<int:batch_id>/revert', methods=['POST'])
+@login_required
+@role_required('admin')
+def revert_import_batch(batch_id):
+    """回滚导入批次。"""
+    conn = get_db()
+    batch = get_batch(batch_id, conn=conn)
+    if not batch:
+        conn.close()
+        flash('批次不存在', 'error')
+        return redirect(url_for('batches_list'))
+
+    if not current_user.is_admin():
+        conn.close()
+        flash('只有管理员可以回滚批次', 'error')
+        return redirect(url_for('batch_detail', batch_id=batch_id))
+
+    revert_note = request.form.get('note', '').strip()
+
+    try:
+        success, msg = revert_batch(
+            batch_id, reverted_by=current_user.id,
+            revert_note=revert_note, conn=conn
+        )
+        if success:
+            conn.commit()
+            flash(msg, 'success')
+        else:
+            conn.rollback()
+            flash(msg, 'error')
+    except Exception as e:
+        conn.rollback()
+        flash(f'回滚失败: {e}', 'error')
+    finally:
+        conn.close()
+
+    return redirect(url_for('batch_detail', batch_id=batch_id))
 
 
 if __name__ == '__main__':

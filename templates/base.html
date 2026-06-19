@@ -321,6 +321,7 @@
             <div class="section-title">管理功能</div>
             <a href="{{ url_for('schemes') }}" class="{% if 'scheme' in request.endpoint %}active{% endif %}">📑 标签方案</a>
             <a href="{{ url_for('users') }}" class="{% if 'user' in request.endpoint %}active{% endif %}">👥 用户管理</a>
+            <a href="{{ url_for('batches_list') }}" class="{% if 'batch' in request.endpoint %}active{% endif %}">📦 导入批次</a>
             <a href="{{ url_for('export_page') }}" class="{% if 'export' in request.endpoint %}active{% endif %}">📤 数据导出</a>
             <a href="{{ url_for('history') }}" class="{% if request.endpoint == 'history' %}active{% endif %}">📜 修订历史</a>
             {% endif %}

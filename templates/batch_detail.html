@@ -1,0 +1,269 @@
+{% extends "base.html" %}
+{% block title %}批次详情{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>批次 #{{ batch.id }} 详情</h1>
+    <a href="{{ url_for('batches_list') }}" class="btn btn-outline">← 返回列表</a>
+</div>
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-label">批次类型</div>
+        <div class="stat-value" style="font-size:20px;">
+            {% if batch.batch_type == 'sample' %}样本导入{% else %}标注导入{% endif %}
+        </div>
+    </div>
+    <div class="stat-card {% if batch.status == 'preview' %}orange{% elif batch.status == 'confirmed' %}green{% else %}purple{% endif %}">
+        <div class="stat-label">状态</div>
+        <div class="stat-value" style="font-size:20px;">
+            {% if batch.status == 'preview' %}预演中
+            {% elif batch.status == 'confirmed' %}已确认
+            {% elif batch.status == 'reverted' %}已撤销
+            {% endif %}
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">总行数</div>
+        <div class="stat-value">{{ batch.total_rows }}</div>
+    </div>
+    <div class="stat-card green">
+        <div class="stat-label">新增</div>
+        <div class="stat-value">{{ batch.new_count }}</div>
+    </div>
+    {% if batch.update_count %}
+    <div class="stat-card">
+        <div class="stat-label">更新</div>
+        <div class="stat-value">{{ batch.update_count }}</div>
+    </div>
+    {% endif %}
+    <div class="stat-card orange">
+        <div class="stat-label">跳过-重复</div>
+        <div class="stat-value">{{ batch.skip_duplicate_count or 0 }}</div>
+    </div>
+    <div class="stat-card red">
+        <div class="stat-label">跳过-错误</div>
+        <div class="stat-value">{{ batch.skip_error_count or 0 }}</div>
+    </div>
+    {% if batch.skip_unknown_label_count %}
+    <div class="stat-card red">
+        <div class="stat-label">跳过-未知标签</div>
+        <div class="stat-value">{{ batch.skip_unknown_label_count }}</div>
+    </div>
+    {% endif %}
+    {% if batch.skip_missing_sample_count %}
+    <div class="stat-card red">
+        <div class="stat-label">跳过-缺失样本</div>
+        <div class="stat-value">{{ batch.skip_missing_sample_count }}</div>
+    </div>
+    {% endif %}
+    {% if batch.conflict_created_count %}
+    <div class="stat-card red">
+        <div class="stat-label">新增冲突</div>
+        <div class="stat-value">{{ batch.conflict_created_count }}</div>
+    </div>
+    {% endif %}
+    {% if batch.conflict_affected_count %}
+    <div class="stat-card orange">
+        <div class="stat-label">影响冲突</div>
+        <div class="stat-value">{{ batch.conflict_affected_count }}</div>
+    </div>
+    {% endif %}
+    {% if batch.old_scheme_residue_count %}
+    <div class="stat-card purple">
+        <div class="stat-label">旧方案残留</div>
+        <div class="stat-value">{{ batch.old_scheme_residue_count }}</div>
+    </div>
+    {% endif %}
+</div>
+
+<div class="card">
+    <div class="card-title">基本信息</div>
+    <table style="max-width:600px;">
+        <tr><th style="width:150px;">文件名</th><td>{{ batch.file_name }}</td></tr>
+        <tr><th>文件大小</th><td>{{ batch.file_size or '-' }} 字节</td></tr>
+        <tr><th>文件哈希</th><td><code class="text-sm">{{ batch.file_hash or '-' }}</code></td></tr>
+        <tr><th>创建人</th><td>{{ creator or '-' }}</td></tr>
+        <tr><th>创建时间</th><td>{{ batch.created_at }}</td></tr>
+        <tr><th>确认时间</th><td>{{ batch.confirmed_at or '-' }}</td></tr>
+        <tr><th>撤销时间</th><td>{{ batch.reverted_at or '-' }}</td></tr>
+        <tr><th>撤销人</th><td>{{ reverter or '-' }}</td></tr>
+        {% if batch.revert_note %}
+        <tr><th>撤销说明</th><td>{{ batch.revert_note }}</td></tr>
+        {% endif %}
+    </table>
+</div>
+
+<div class="card">
+    <div class="card-title flex justify-between items-center" style="margin-bottom:12px;">
+        <span>操作</span>
+    </div>
+    <div class="flex gap-2">
+        {% if batch.status == 'preview' %}
+        <form method="post" action="{{ url_for('confirm_import_batch', batch_id=batch.id) }}" onsubmit="return confirm('确认要将本批次数据正式入库吗？');">
+            <button type="submit" class="btn btn-success">✅ 确认导入</button>
+        </form>
+        {% endif %}
+        {% if batch.status == 'confirmed' %}
+        <form method="post" action="{{ url_for('revert_import_batch', batch_id=batch.id) }}" onsubmit="return confirm('确认要撤销本批次导入吗？\n所有本批次产生的新增、更新、冲突和复核任务都将被回退。');">
+            <input type="hidden" name="note" value="手动撤销">
+            <button type="submit" class="btn btn-danger">↩️ 撤销导入</button>
+        </form>
+        {% endif %}
+    </div>
+</div>
+
+{% if sample_records %}
+<div class="card">
+    <div class="card-title">样本明细 ({{ sample_records|length }})</div>
+    <table>
+        <thead>
+            <tr>
+                <th>行号</th>
+                <th>样本编号</th>
+                <th>操作</th>
+                <th>内容预览</th>
+                <th>错误原因</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in sample_records %}
+            <tr>
+                <td>{{ r.row_number or '-' }}</td>
+                <td><code>{{ r.sample_code }}</code></td>
+                <td>
+                    {% if r.action == 'create' %}
+                    <span class="badge badge-green">新增</span>
+                    {% elif r.action == 'skip_duplicate' %}
+                    <span class="badge badge-yellow">跳过-重复</span>
+                    {% elif r.action == 'skip_error' %}
+                    <span class="badge badge-red">跳过-错误</span>
+                    {% endif %}
+                </td>
+                <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                    {{ r.new_content or r.old_content or '' }}
+                </td>
+                <td class="text-danger text-sm">{{ r.error_reason or '' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% if annotation_records %}
+<div class="card">
+    <div class="card-title">标注明细 ({{ annotation_records|length }})</div>
+    <table>
+        <thead>
+            <tr>
+                <th>行号</th>
+                <th>样本编号</th>
+                <th>操作</th>
+                <th>原标签</th>
+                <th>新标签</th>
+                <th>错误原因</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in annotation_records %}
+            <tr>
+                <td>{{ r.row_number or '-' }}</td>
+                <td><code>{{ r.sample_code }}</code></td>
+                <td>
+                    {% if r.action == 'create' %}
+                    <span class="badge badge-green">新增</span>
+                    {% elif r.action == 'update' %}
+                    <span class="badge badge-blue">更新</span>
+                    {% elif r.action == 'skip_duplicate' %}
+                    <span class="badge badge-yellow">跳过-重复</span>
+                    {% elif r.action == 'skip_error' %}
+                    <span class="badge badge-red">跳过-错误</span>
+                    {% elif r.action == 'skip_unknown_label' %}
+                    <span class="badge badge-red">跳过-未知标签</span>
+                    {% elif r.action == 'skip_missing_sample' %}
+                    <span class="badge badge-red">跳过-缺失样本</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if r.old_label_text %}
+                    <span class="label-tag" style="background:#9ca3af;">{{ r.old_label_text }}</span>
+                    {% else %}-{% endif %}
+                </td>
+                <td>
+                    {% if r.new_label_text %}
+                    <span class="label-tag" style="background:#3b82f6;">{{ r.new_label_text }}</span>
+                    {% else %}-{% endif %}
+                </td>
+                <td class="text-danger text-sm">{{ r.error_reason or '' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% if conflict_records %}
+<div class="card">
+    <div class="card-title">冲突明细 ({{ conflict_records|length }})</div>
+    <table>
+        <thead>
+            <tr>
+                <th>冲突ID</th>
+                <th>操作</th>
+                <th>原状态</th>
+                <th>新状态</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in conflict_records %}
+            <tr>
+                <td>#{{ r.conflict_id or '-' }}</td>
+                <td>
+                    {% if r.action == 'created' %}
+                    <span class="badge badge-red">新增冲突</span>
+                    {% else %}
+                    <span class="badge badge-orange">影响</span>
+                    {% endif %}
+                </td>
+                <td>{{ r.old_status or '-' }}</td>
+                <td>{{ r.new_status or '-' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% if review_task_records %}
+<div class="card">
+    <div class="card-title">复核任务明细 ({{ review_task_records|length }})</div>
+    <table>
+        <thead>
+            <tr>
+                <th>任务ID</th>
+                <th>操作</th>
+                <th>原状态</th>
+                <th>新状态</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in review_task_records %}
+            <tr>
+                <td>#{{ r.review_task_id or '-' }}</td>
+                <td>
+                    {% if r.action == 'created' %}
+                    <span class="badge badge-blue">新增</span>
+                    {% else %}
+                    <span class="badge badge-orange">影响</span>
+                    {% endif %}
+                </td>
+                <td>{{ r.old_status or '-' }}</td>
+                <td>{{ r.new_status or '-' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% endblock %}

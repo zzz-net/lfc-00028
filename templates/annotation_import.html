@@ -18,7 +18,7 @@
                 <option value="{{ s.id }}">{{ s.name }} v{{ s.version }}{% if s.is_active %} (当前启用){% endif %}</option>
                 {% endfor %}
                 </select>
-                <small class="text-muted">系统会校验标签是否存在于该方案中，未知标签会被标记</small>
+                <small class="text-muted">系统会校验标签是否存在于该方案中，<strong>未知标签不会被导入</strong></small>
             </div>
             {% if current_user.is_admin() %}
             <div class="form-group">
@@ -65,7 +65,7 @@ S002,negative,用户有较强抱怨
         <div class="mt-4">
             <div class="flash flash-warning" style="font-size:13px;">
                 ⚠️ 系统会自动检测：<br>
-                1. <strong>未知标签</strong>：若标签不在方案中，会标记为未知标签<br>
+                1. <strong>未知标签</strong>：若标签不在方案中，该条会被跳过，不入库<br>
                 2. <strong>缺失样本</strong>：若样本编号不存在，会跳过该条<br>
                 3. <strong>重复标注</strong>：同标注员对同样本的重复标注会更新而非新增
             </div>

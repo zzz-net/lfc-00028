@@ -202,6 +202,21 @@ class LockAndUnknownLabelRegressionTests(unittest.TestCase):
         self.assertIn("缺失样本被跳过", page)
         self.assertIn("NOT_EXIST", page)
 
+        # ---------- 验证标注列表页筛选"仅显示未知标签"结果为空 ----------
+        resp = self.client.get(f"/annotations?scheme_id={scheme_id}&unknown_only=1")
+        self.assertEqual(resp.status_code, 200)
+        page_list = resp.data.decode("utf-8")
+        self.assertIn("暂无标注数据", page_list,
+                      "筛选未知标签时应显示空状态，因为未知标签不入库")
+
+        # ---------- 验证导入页提示文案与实际行为一致 ----------
+        resp = self.client.get("/annotations/import")
+        self.assertEqual(resp.status_code, 200)
+        page_import = resp.data.decode("utf-8")
+        self.assertIn("未知标签不会被导入", page_import,
+                      "导入页应明确提示未知标签不入库，而不是'被标记'")
+        self.assertIn("该条会被跳过，不入库", page_import)
+
     def test_03_full_workflow_no_lock_no_unknown(self):
         """
         完整主链路: 造冲突数据 → 检测冲突 → 分配复核(回避+正常) → 完成复核 → 导出

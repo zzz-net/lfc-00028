@@ -1285,6 +1285,22 @@ def batch_detail(batch_id):
         if row:
             reverter = row['display_name'] or row['username']
 
+    preview_info = {}
+    if batch['preview_data']:
+        try:
+            preview_info = json.loads(batch['preview_data'])
+        except Exception:
+            preview_info = {}
+
+    config_info = {}
+    if batch['config_snapshot']:
+        try:
+            config_info = json.loads(batch['config_snapshot'])
+        except Exception:
+            config_info = {}
+
+    affected_reviews = preview_info.get('affected_pending_reviews', [])
+
     conn.close()
     return render_template('batch_detail.html',
                            batch=batch,
@@ -1293,7 +1309,10 @@ def batch_detail(batch_id):
                            conflict_records=conflict_records,
                            review_task_records=review_task_records,
                            creator=creator,
-                           reverter=reverter)
+                           reverter=reverter,
+                           preview_info=preview_info,
+                           config_info=config_info,
+                           affected_reviews=affected_reviews)
 
 
 @app.route('/samples/import/preview', methods=['POST'])
@@ -1334,6 +1353,18 @@ def preview_samples_import():
     reader = csv.DictReader(io.StringIO(content))
     rows = list(reader)
     total_rows = len(rows)
+    fieldnames = reader.fieldnames or []
+
+    config_snapshot = json.dumps({
+        'import_type': 'sample',
+        'scheme_id': scheme['id'],
+        'scheme_name': scheme['name'],
+        'scheme_version': scheme['version'],
+        'uploaded_by': current_user.username,
+        'uploaded_by_role': current_user.role,
+        'csv_columns': fieldnames,
+        'timestamp': datetime.now().isoformat(),
+    }, ensure_ascii=False)
 
     batch_id = create_batch(
         batch_type='sample',
@@ -1342,6 +1373,7 @@ def preview_samples_import():
         file_hash=file_hash,
         file_size=file_size,
         created_by=current_user.id,
+        config_snapshot=config_snapshot,
         conn=conn
     )
 
@@ -1480,6 +1512,25 @@ def preview_annotations_import():
     reader = csv.DictReader(io.StringIO(content))
     rows = list(reader)
     total_rows = len(rows)
+    fieldnames = reader.fieldnames or []
+
+    annotator_user = conn.execute(
+        "SELECT username, display_name FROM users WHERE id = ?", (int(annotator_id),)
+    ).fetchone()
+
+    config_snapshot = json.dumps({
+        'import_type': 'annotation',
+        'scheme_id': scheme['id'],
+        'scheme_name': scheme['name'],
+        'scheme_version': scheme['version'],
+        'annotator_id': int(annotator_id),
+        'annotator_username': annotator_user['username'] if annotator_user else None,
+        'annotator_display_name': annotator_user['display_name'] if annotator_user else None,
+        'uploaded_by': current_user.username,
+        'uploaded_by_role': current_user.role,
+        'csv_columns': fieldnames,
+        'timestamp': datetime.now().isoformat(),
+    }, ensure_ascii=False)
 
     batch_id = create_batch(
         batch_type='annotation',
@@ -1488,6 +1539,7 @@ def preview_annotations_import():
         file_hash=file_hash,
         file_size=file_size,
         created_by=current_user.id,
+        config_snapshot=config_snapshot,
         conn=conn
     )
 
@@ -1498,6 +1550,7 @@ def preview_annotations_import():
     errors = []
     potential_conflicts = []
     old_scheme_residue = 0
+    affected_pending_reviews = []
 
     for i, row in enumerate(rows, start=2):
         sample_id = (row.get('sample_id') or row.get('id') or '').strip()
@@ -1596,6 +1649,22 @@ def preview_annotations_import():
         if other_labels and matched_label['label_key'] not in other_labels:
             potential_conflicts.append(sample_id)
 
+        pending_reviews = conn.execute(
+            "SELECT rt.id, rt.status, u.display_name as reviewer_name, c.id as conflict_id "
+            "FROM review_tasks rt JOIN conflicts c ON c.id = rt.conflict_id "
+            "LEFT JOIN users u ON u.id = rt.reviewer_id "
+            "WHERE c.sample_id = ? AND c.scheme_id = ? AND rt.status IN ('pending', 'in_progress')",
+            (sample['id'], scheme['id'])
+        ).fetchall()
+        for pr in pending_reviews:
+            affected_pending_reviews.append({
+                'sample_id': sample_id,
+                'review_task_id': pr['id'],
+                'conflict_id': pr['conflict_id'],
+                'status': pr['status'],
+                'reviewer': pr['reviewer_name'] or '',
+            })
+
     stats = {
         'total_rows': total_rows,
         'new_count': new_count,
@@ -1605,6 +1674,7 @@ def preview_annotations_import():
         'skip_unknown_label_count': len(unknown_labels),
         'skip_missing_sample_count': len(missing_samples),
         'conflict_created_count': len(potential_conflicts),
+        'review_task_affected_count': len(affected_pending_reviews),
         'old_scheme_residue_count': old_scheme_residue,
     }
     update_batch_stats(batch_id, stats, conn=conn)
@@ -1619,6 +1689,7 @@ def preview_annotations_import():
         'missing_samples': missing_samples,
         'errors': errors,
         'potential_conflicts': potential_conflicts,
+        'affected_pending_reviews': affected_pending_reviews,
         'old_scheme_residue': old_scheme_residue,
     }, ensure_ascii=False)
     conn.execute("UPDATE import_batches SET preview_data = ? WHERE id = ?",
@@ -1872,6 +1943,174 @@ def revert_import_batch(batch_id):
         conn.close()
 
     return redirect(url_for('batch_detail', batch_id=batch_id))
+
+
+@app.route('/batches/<int:batch_id>/export', methods=['GET'])
+@login_required
+@role_required('admin')
+def export_batch_diff(batch_id):
+    """导出批次差异（预检单/变化清单）为 CSV。"""
+    conn = get_db()
+    batch = get_batch(batch_id, conn=conn)
+    if not batch:
+        conn.close()
+        flash('批次不存在', 'error')
+        return redirect(url_for('batches_list'))
+
+    sample_records = []
+    annotation_records = []
+    conflict_records = []
+    review_task_records = []
+
+    if batch['batch_type'] == 'sample':
+        sample_records = get_batch_sample_records(batch_id, conn=conn)
+    elif batch['batch_type'] == 'annotation':
+        annotation_records = get_batch_annotation_records(batch_id, conn=conn)
+        conflict_records = get_batch_conflict_records(batch_id, conn=conn)
+        review_task_records = get_batch_review_task_records(batch_id, conn=conn)
+
+    creator = None
+    if batch['created_by']:
+        row = conn.execute("SELECT display_name, username FROM users WHERE id = ?",
+                          (batch['created_by'],)).fetchone()
+        if row:
+            creator = row['display_name'] or row['username']
+
+    conn.close()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    status_map = {'preview': '预演中', 'confirmed': '已确认', 'reverted': '已撤销'}
+    type_map = {'sample': '样本导入', 'annotation': '标注导入'}
+
+    writer.writerow(['# 数据接入批次预检单/变化清单'])
+    writer.writerow([f'# 批次ID: #{batch["id"]}'])
+    writer.writerow([f'# 批次类型: {type_map.get(batch["batch_type"], "?")}'])
+    writer.writerow([f'# 状态: {status_map.get(batch["status"], batch["status"])}'])
+    writer.writerow([f'# 文件名: {batch["file_name"]}'])
+    writer.writerow([f'# 文件哈希(MD5): {batch["file_hash"] or "-"}'])
+    writer.writerow([f'# 文件大小: {batch["file_size"] or 0} 字节'])
+    writer.writerow([f'# 操作人: {creator or "-"}'])
+    writer.writerow([f'# 创建时间: {batch["created_at"]}'])
+    writer.writerow([f'# 确认时间: {batch["confirmed_at"] or "-"}'])
+    writer.writerow([f'# 撤销时间: {batch["reverted_at"] or "-"}'])
+    if batch['revert_note']:
+        writer.writerow([f'# 撤销说明: {batch["revert_note"]}'])
+    writer.writerow([])
+
+    writer.writerow(['## 影响统计'])
+    writer.writerow(['指标', '数量'])
+    writer.writerow(['总行数', batch['total_rows'] or 0])
+    writer.writerow(['新增', batch['new_count'] or 0])
+    writer.writerow(['更新/覆盖', batch['update_count'] or 0])
+    writer.writerow(['跳过-重复', batch['skip_duplicate_count'] or 0])
+    writer.writerow(['跳过-坏行(错误)', batch['skip_error_count'] or 0])
+    writer.writerow(['跳过-未知标签', batch['skip_unknown_label_count'] or 0])
+    writer.writerow(['跳过-缺失样本', batch['skip_missing_sample_count'] or 0])
+    writer.writerow(['新增冲突', batch['conflict_created_count'] or 0])
+    writer.writerow(['牵动冲突(已存在)', batch['conflict_affected_count'] or 0])
+    writer.writerow(['牵动待复核任务', batch['review_task_affected_count'] or 0])
+    writer.writerow(['旧方案残留', batch['old_scheme_residue_count'] or 0])
+    writer.writerow([])
+
+    if batch['config_snapshot']:
+        try:
+            cfg = json.loads(batch['config_snapshot'])
+            writer.writerow(['## 配置快照'])
+            for k, v in cfg.items():
+                writer.writerow([k, json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v])
+            writer.writerow([])
+        except Exception:
+            pass
+
+    if sample_records:
+        writer.writerow(['## 样本明细'])
+        writer.writerow(['行号', '样本编号', '操作', '内容预览', '错误原因'])
+        action_map = {'create': '新增', 'skip_duplicate': '跳过-重复', 'skip_error': '跳过-坏行'}
+        for r in sample_records:
+            writer.writerow([
+                r['row_number'] or '-',
+                r['sample_code'] or '',
+                action_map.get(r['action'], r['action']),
+                (r['new_content'] or r['old_content'] or '')[:80],
+                r['error_reason'] or ''
+            ])
+        writer.writerow([])
+
+    if annotation_records:
+        writer.writerow(['## 标注明细'])
+        writer.writerow(['行号', '样本编号', '操作', '原标签', '新标签', '原备注', '新备注', '错误原因'])
+        action_map = {
+            'create': '新增', 'update': '更新/覆盖',
+            'skip_duplicate': '跳过-重复', 'skip_error': '跳过-坏行',
+            'skip_unknown_label': '跳过-未知标签', 'skip_missing_sample': '跳过-缺失样本'
+        }
+        for r in annotation_records:
+            writer.writerow([
+                r['row_number'] or '-',
+                r['sample_code'] or '',
+                action_map.get(r['action'], r['action']),
+                r['old_label_text'] or '',
+                r['new_label_text'] or '',
+                r['old_comment'] or '',
+                r['new_comment'] or '',
+                r['error_reason'] or ''
+            ])
+        writer.writerow([])
+
+    if conflict_records:
+        writer.writerow(['## 冲突影响'])
+        writer.writerow(['冲突ID', '操作', '原状态', '新状态'])
+        action_map = {'created': '新增冲突', 'affected': '牵动已有冲突'}
+        for r in conflict_records:
+            writer.writerow([
+                f"#{r['conflict_id']}" if r['conflict_id'] else '-',
+                action_map.get(r['action'], r['action']),
+                r['old_status'] or '-',
+                r['new_status'] or '-'
+            ])
+        writer.writerow([])
+
+    if review_task_records:
+        writer.writerow(['## 复核任务影响'])
+        writer.writerow(['任务ID', '操作', '原状态', '新状态', '原复核员', '新复核员'])
+        for r in review_task_records:
+            writer.writerow([
+                f"#{r['review_task_id']}" if r['review_task_id'] else '-',
+                r['action'],
+                r['old_status'] or '-',
+                r['new_status'] or '-',
+                r['old_reviewer_id'] or '-',
+                r['new_reviewer_id'] or '-'
+            ])
+        writer.writerow([])
+
+    if batch['preview_data']:
+        try:
+            pd = json.loads(batch['preview_data'])
+            if 'affected_pending_reviews' in pd and pd['affected_pending_reviews']:
+                writer.writerow(['## 牵动的待复核任务(导入前已存在)'])
+                writer.writerow(['样本编号', '复核任务ID', '冲突ID', '任务状态', '复核员'])
+                for pr in pd['affected_pending_reviews']:
+                    writer.writerow([
+                        pr.get('sample_id', ''),
+                        f"#{pr.get('review_task_id', '-')}",
+                        f"#{pr.get('conflict_id', '-')}",
+                        pr.get('status', ''),
+                        pr.get('reviewer', '')
+                    ])
+                writer.writerow([])
+        except Exception:
+            pass
+
+    output.seek(0)
+    filename = f"batch_{batch['id']}_{batch['batch_type']}_{batch['status']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    return Response(
+        output.getvalue().encode('utf-8-sig'),
+        mimetype='text/csv; charset=utf-8',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'}
+    )
 
 
 if __name__ == '__main__':

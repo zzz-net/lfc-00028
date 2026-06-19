@@ -64,8 +64,14 @@
     {% endif %}
     {% if batch.conflict_affected_count %}
     <div class="stat-card orange">
-        <div class="stat-label">影响冲突</div>
+        <div class="stat-label">牵动冲突</div>
         <div class="stat-value">{{ batch.conflict_affected_count }}</div>
+    </div>
+    {% endif %}
+    {% if batch.review_task_affected_count %}
+    <div class="stat-card" style="background:#fef3c7;border-color:#f59e0b;">
+        <div class="stat-label">牵动待复核</div>
+        <div class="stat-value">{{ batch.review_task_affected_count }}</div>
     </div>
     {% endif %}
     {% if batch.old_scheme_residue_count %}
@@ -97,7 +103,7 @@
     <div class="card-title flex justify-between items-center" style="margin-bottom:12px;">
         <span>操作</span>
     </div>
-    <div class="flex gap-2">
+    <div class="flex gap-2 flex-wrap">
         {% if batch.status == 'preview' %}
         <form method="post" action="{{ url_for('confirm_import_batch', batch_id=batch.id) }}" onsubmit="return confirm('确认要将本批次数据正式入库吗？');">
             <button type="submit" class="btn btn-success">✅ 确认导入</button>
@@ -109,6 +115,7 @@
             <button type="submit" class="btn btn-danger">↩️ 撤销导入</button>
         </form>
         {% endif %}
+        <a href="{{ url_for('export_batch_diff', batch_id=batch.id) }}" class="btn btn-outline">📄 导出预检单/变化清单</a>
     </div>
 </div>
 
@@ -259,6 +266,63 @@
                 </td>
                 <td>{{ r.old_status or '-' }}</td>
                 <td>{{ r.new_status or '-' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% if affected_reviews %}
+<div class="card" style="border-color:#f59e0b;">
+    <div class="card-title" style="color:#b45309;">⚠️ 牵动的待复核任务 ({{ affected_reviews|length }})</div>
+    <div style="margin-bottom:10px;color:#92400e;font-size:14px;">
+        以下样本已有进行中的复核任务，导入新标注可能会改变这些复核任务的判断依据，请确认是否继续。
+    </div>
+    <table>
+        <thead>
+            <tr>
+                <th>样本编号</th>
+                <th>复核任务ID</th>
+                <th>冲突ID</th>
+                <th>任务状态</th>
+                <th>复核员</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in affected_reviews %}
+            <tr>
+                <td><code>{{ r.sample_id }}</code></td>
+                <td>#{{ r.review_task_id }}</td>
+                <td>#{{ r.conflict_id }}</td>
+                <td>
+                    {% if r.status == 'pending' %}<span class="badge badge-yellow">待处理</span>
+                    {% elif r.status == 'in_progress' %}<span class="badge badge-blue">处理中</span>
+                    {% else %}{{ r.status }}{% endif %}
+                </td>
+                <td>{{ r.reviewer or '-' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% if config_info %}
+<div class="card">
+    <div class="card-title">配置快照</div>
+    <table style="max-width:700px;">
+        <tbody>
+            {% for key, value in config_info.items() %}
+            <tr>
+                <th style="width:200px;">{{ key }}</th>
+                <td>
+                    {% if value is mapping or value is sequence and value is not string %}
+                    <pre style="margin:0;padding:8px;background:#f3f4f6;border-radius:4px;font-size:12px;overflow-x:auto;">{{ value | tojson(indent=2) }}</pre>
+                    {% else %}
+                    {{ value }}
+                    {% endif %}
+                </td>
             </tr>
             {% endfor %}
         </tbody>

@@ -136,6 +136,7 @@ def init_db():
         conflict_created_count INTEGER DEFAULT 0,
         conflict_affected_count INTEGER DEFAULT 0,
         review_task_created_count INTEGER DEFAULT 0,
+        review_task_affected_count INTEGER DEFAULT 0,
         old_scheme_residue_count INTEGER DEFAULT 0,
         status TEXT DEFAULT 'preview' CHECK (status IN ('preview', 'confirmed', 'reverted')),
         created_by INTEGER REFERENCES users(id),
@@ -144,8 +145,11 @@ def init_db():
         reverted_at TIMESTAMP,
         reverted_by INTEGER REFERENCES users(id),
         revert_note TEXT,
-        preview_data TEXT
+        preview_data TEXT,
+        config_snapshot TEXT
     )''')
+
+    _migrate_import_batches_columns(c)
 
     c.execute('''CREATE TABLE IF NOT EXISTS batch_sample_records (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -240,6 +244,15 @@ def init_db():
     conn.close()
 
 
+def _migrate_import_batches_columns(c):
+    """迁移：确保 import_batches 表有最新字段。"""
+    existing_cols = [row[1] for row in c.execute("PRAGMA table_info(import_batches)").fetchall()]
+    if 'config_snapshot' not in existing_cols:
+        c.execute("ALTER TABLE import_batches ADD COLUMN config_snapshot TEXT")
+    if 'review_task_affected_count' not in existing_cols:
+        c.execute("ALTER TABLE import_batches ADD COLUMN review_task_affected_count INTEGER DEFAULT 0")
+
+
 class User(UserMixin):
     def __init__(self, id, username, role, display_name=None):
         self.id = id
@@ -304,15 +317,15 @@ def log_revision(entity_type, entity_id, action, old_value=None, new_value=None,
 
 
 def create_batch(batch_type, scheme_id, file_name, file_hash=None, file_size=None,
-                 created_by=None, preview_data=None, conn=None):
+                 created_by=None, preview_data=None, config_snapshot=None, conn=None):
     """创建导入批次记录。
 
     返回批次 ID。
     """
     sql = ("INSERT INTO import_batches "
-           "(batch_type, scheme_id, file_name, file_hash, file_size, created_by, preview_data, status) "
-           "VALUES (?, ?, ?, ?, ?, ?, ?, 'preview')")
-    params = (batch_type, scheme_id, file_name, file_hash, file_size, created_by, preview_data)
+           "(batch_type, scheme_id, file_name, file_hash, file_size, created_by, preview_data, config_snapshot, status) "
+           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'preview')")
+    params = (batch_type, scheme_id, file_name, file_hash, file_size, created_by, preview_data, config_snapshot)
 
     def _do_insert(c):
         cursor = c.execute(sql, params)
@@ -626,11 +639,84 @@ def revert_batch(batch_id, reverted_by=None, revert_note=None, conn=None):
 
 
 def _revert_sample_batch(batch_id, conn=None):
-    """回滚样本批次。"""
+    """回滚样本批次。需要先删除依赖：引用该批次样本的其他批次产生的标注、冲突等。"""
     records = conn.execute(
         "SELECT * FROM batch_sample_records WHERE batch_id = ? AND action = 'create'",
         (batch_id,)
     ).fetchall()
+
+    sample_db_ids = [r['sample_db_id'] for r in records if r['sample_db_id']]
+
+    if sample_db_ids:
+        placeholders = ','.join('?' * len(sample_db_ids))
+
+        conn.execute(
+            f"UPDATE batch_sample_records SET sample_db_id = NULL WHERE sample_db_id IN ({placeholders})",
+            sample_db_ids
+        )
+        conn.execute(
+            f"UPDATE batch_annotation_records SET sample_db_id = NULL WHERE sample_db_id IN ({placeholders})",
+            sample_db_ids
+        )
+        conn.execute(
+            f"UPDATE batch_conflict_records SET sample_db_id = NULL WHERE sample_db_id IN ({placeholders})",
+            sample_db_ids
+        )
+
+        dependent_annotation_ids = conn.execute(
+            f"SELECT id FROM annotations WHERE sample_id IN ({placeholders})",
+            sample_db_ids
+        ).fetchall()
+        ann_ids = [row['id'] for row in dependent_annotation_ids]
+
+        if ann_ids:
+            ann_placeholders = ','.join('?' * len(ann_ids))
+            conn.execute(
+                f"UPDATE batch_annotation_records SET annotation_id = NULL WHERE annotation_id IN ({ann_placeholders})",
+                ann_ids
+            )
+            conn.execute(
+                f"DELETE FROM conflict_annotations WHERE annotation_id IN ({ann_placeholders})",
+                ann_ids
+            )
+
+        dependent_conflict_ids = conn.execute(
+            f"SELECT id FROM conflicts WHERE sample_id IN ({placeholders})",
+            sample_db_ids
+        ).fetchall()
+        c_ids = [row['id'] for row in dependent_conflict_ids]
+        if c_ids:
+            c_placeholders = ','.join('?' * len(c_ids))
+            conn.execute(
+                f"UPDATE batch_conflict_records SET conflict_id = NULL WHERE conflict_id IN ({c_placeholders})",
+                c_ids
+            )
+            conn.execute(
+                f"UPDATE batch_review_task_records SET review_task_id = NULL WHERE conflict_id IN ({c_placeholders})",
+                c_ids
+            )
+            conn.execute(
+                f"DELETE FROM review_tasks WHERE conflict_id IN ({c_placeholders})",
+                c_ids
+            )
+            conn.execute(
+                f"DELETE FROM conflicts WHERE id IN ({c_placeholders})",
+                c_ids
+            )
+
+        if ann_ids:
+            ann_placeholders = ','.join('?' * len(ann_ids))
+            for ann_row in conn.execute(
+                f"SELECT id, label_text FROM annotations WHERE id IN ({ann_placeholders})",
+                ann_ids
+            ).fetchall():
+                log_revision('annotation', ann_row['id'], 'delete',
+                             old_value=ann_row['label_text'],
+                             conn=conn)
+            conn.execute(
+                f"DELETE FROM annotations WHERE id IN ({ann_placeholders})",
+                ann_ids
+            )
 
     for rec in records:
         if rec['sample_db_id']:

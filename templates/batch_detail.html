@@ -115,9 +115,66 @@
             <button type="submit" class="btn btn-danger">↩️ 撤销导入</button>
         </form>
         {% endif %}
+        <form method="post" action="{{ url_for('replay_batch_preview', batch_id=batch.id) }}" onsubmit="return confirm('基于当前数据库状态重新执行一次预检（不会写入数据），生成一个新的 preview 批次用于比对统计。是否继续？');">
+            <button type="submit" class="btn btn-outline">🔄 重复预检</button>
+        </form>
         <a href="{{ url_for('export_batch_diff', batch_id=batch.id) }}" class="btn btn-outline">📄 导出预检单/变化清单</a>
     </div>
 </div>
+
+{% if preview_info.get('export_summary_before') and preview_info.get('export_summary_after') %}
+<div class="card">
+    <div class="card-title">导出摘要变化预览</div>
+    <table style="max-width:700px;">
+        <thead>
+            <tr>
+                <th>指标</th>
+                <th>导入前</th>
+                <th>导入后(预计)</th>
+                <th>变化</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% set before = preview_info.export_summary_before %}
+            {% set after = preview_info.export_summary_after %}
+            {% for key in ['total_samples', 'total_annotations', 'open_conflicts', 'resolved_conflicts', 'pending_reviews', 'completed_reviews'] %}
+            <tr>
+                <td>{{ {'total_samples':'样本总数','total_annotations':'标注总数','open_conflicts':'待处理冲突','resolved_conflicts':'已解决冲突','pending_reviews':'待复核任务','completed_reviews':'已完成复核'}[key] }}</td>
+                <td>{{ before.get(key, 0) }}</td>
+                <td>{{ after.get(key, 0) }}</td>
+                {% set diff = (after.get(key, 0) - before.get(key, 0)) %}
+                <td style="color:{{ 'green' if diff > 0 else ('red' if diff < 0 else 'gray') }};">
+                    {{ '+' if diff > 0 else '' }}{{ diff }}
+                </td>
+            </tr>
+            {% endfor %}
+            {% if before.get('per_label_counts') or after.get('per_label_counts') %}
+            <tr><th colspan="4" style="text-align:left;padding-top:12px;">按标签分布</th></tr>
+            {% set labels_before = before.get('per_label_counts', {}) %}
+            {% set labels_after = after.get('per_label_counts', {}) %}
+            {% set all_keys = [] %}
+            {% for k in labels_before.keys() %}
+              {% if k not in all_keys %}{% set _ = all_keys.append(k) %}{% endif %}
+            {% endfor %}
+            {% for k in labels_after.keys() %}
+              {% if k not in all_keys %}{% set _ = all_keys.append(k) %}{% endif %}
+            {% endfor %}
+            {% for k in all_keys %}
+            <tr>
+                <td>&nbsp;&nbsp;标签 {{ k }}</td>
+                <td>{{ labels_before.get(k, 0) }}</td>
+                <td>{{ labels_after.get(k, 0) }}</td>
+                {% set diff = (labels_after.get(k, 0) - labels_before.get(k, 0)) %}
+                <td style="color:{{ 'green' if diff > 0 else ('red' if diff < 0 else 'gray') }};">
+                    {{ '+' if diff > 0 else '' }}{{ diff }}
+                </td>
+            </tr>
+            {% endfor %}
+            {% endif %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
 
 {% if sample_records %}
 <div class="card">

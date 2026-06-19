@@ -1035,5 +1035,602 @@ class BatchImportRollbackTests(unittest.TestCase):
         )
 
 
+class BatchCenterAdvancedTests(unittest.TestCase):
+    """批次核对与回放中心 - 高级回归测试。
+
+    覆盖：
+    - 重复预检统计一致性
+    - 撤回后重导统计一致
+    - 权限拦截（预检、重复预检、撤回、确认均需管理员）
+    - 导出摘要变化追踪
+    - 跨重启状态恢复
+    - skip_duplicate_count 正确统计
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="batch_center_")
+        self.test_db_path = os.path.join(self.tmpdir, "test.db")
+        self._orig_db_path = models.DB_PATH
+        models.DB_PATH = self.test_db_path
+        models.init_db()
+        app.config["TESTING"] = True
+        app.config["SECRET_KEY"] = "test-secret"
+        app.config["WTF_CSRF_ENABLED"] = False
+        self.client = app.test_client()
+        self._login("admin", "admin123")
+        self._create_scheme("高级测试方案")
+        self.scheme_id = self._get_active_scheme_id()
+
+    def tearDown(self):
+        try:
+            models.DB_PATH = self._orig_db_path
+        except Exception:
+            pass
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    # ---------- helpers ----------
+
+    def _login(self, username, password):
+        resp = self.client.post("/login", data={
+            "username": username, "password": password
+        }, follow_redirects=True)
+        self.assertEqual(resp.status_code, 200)
+        return resp
+
+    def _create_scheme(self, name="测试方案"):
+        resp = self.client.post("/schemes/new", data={
+            "name": name,
+            "description": "测试用",
+            "labels_json": SCHEME_CREATE_JSON,
+        }, follow_redirects=True)
+        self.assertEqual(resp.status_code, 200)
+
+    def _get_active_scheme_id(self):
+        conn = sqlite3.connect(models.DB_PATH)
+        try:
+            row = conn.execute(
+                "SELECT id FROM label_schemes WHERE is_active=1 ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
+
+    def _query_count(self, table, where="1=1", params=()):
+        conn = sqlite3.connect(models.DB_PATH)
+        try:
+            return conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE {where}", params
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+    def _query_row(self, sql, params=()):
+        conn = sqlite3.connect(models.DB_PATH)
+        try:
+            conn.row_factory = sqlite3.Row
+            return conn.execute(sql, params).fetchone()
+        finally:
+            conn.close()
+
+    def _get_latest_batch_id(self):
+        conn = sqlite3.connect(models.DB_PATH)
+        try:
+            row = conn.execute("SELECT id FROM import_batches ORDER BY id DESC LIMIT 1").fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
+
+    def _import_samples_direct(self, sample_ids):
+        """通过原始导入接口直接导入样本（非批次方式），用于测试前置数据准备。"""
+        rows = [{"sample_id": s, "content": f"样本{s}内容"} for s in sample_ids]
+        csv_bytes = make_csv_bytes(rows, ["sample_id", "content"])
+        self.client.post(
+            "/samples/import",
+            data={"scheme_id": str(self.scheme_id),
+                  "file": (io.BytesIO(csv_bytes), "s.csv")},
+            content_type="multipart/form-data",
+            follow_redirects=True,
+        )
+
+    # ---------- 1. skip_duplicate_count 正确性测试 ----------
+
+    def test_01_skip_duplicate_count_annotation(self):
+        """标注预检中 skip_duplicate_count 应正确统计（包括批次内重复 + DB重复）。"""
+        self._import_samples_direct(["T001", "T002", "T003"])
+
+        ann_csv = make_csv_bytes([
+            {"sample_id": "T001", "label": "positive", "comment": "a"},
+            {"sample_id": "T001", "label": "neutral", "comment": "b"},
+            {"sample_id": "T002", "label": "negative", "comment": "c"},
+        ], ["sample_id", "label", "comment"])
+        self.client.post(
+            "/annotations/import/preview",
+            data={
+                "scheme_id": str(self.scheme_id),
+                "annotator_id": "2",
+                "file": (io.BytesIO(ann_csv), "dup_test.csv"),
+            },
+            content_type="multipart/form-data",
+            follow_redirects=True,
+        )
+        b1 = self._get_latest_batch_id()
+        self.client.post(f"/batches/{b1}/confirm", follow_redirects=True)
+
+        ann_csv2 = make_csv_bytes([
+            {"sample_id": "T001", "label": "positive", "comment": "a"},
+            {"sample_id": "T001", "label": "positive", "comment": "a"},
+            {"sample_id": "T003", "label": "neutral", "comment": "new"},
+        ], ["sample_id", "label", "comment"])
+
+        self.client.post(
+            "/annotations/import/preview",
+            data={
+                "scheme_id": str(self.scheme_id),
+                "annotator_id": "2",
+                "file": (io.BytesIO(ann_csv2), "dup_test2.csv"),
+            },
+            content_type="multipart/form-data",
+            follow_redirects=True,
+        )
+        b2 = self._get_latest_batch_id()
+        batch = self._query_row("SELECT * FROM import_batches WHERE id = ?", (b2,))
+
+        self.assertEqual(batch["skip_duplicate_count"], 2,
+                         "应有2条重复：1条DB完全相同(T001+positive+a，加上1条批次内重复")
+        self.assertEqual(batch["new_count"], 1, "应有1条新增(T003)")
+
+    # ---------- 2. 重复预检功能 ----------
+
+    def test_02_replay_preview_sample_batch(self):
+        """对样本批次执行重复预检，应生成新 preview 批次且统计一致。"""
+        samples_csv = make_csv_bytes([
+            {"sample_id": "R001", "content": "重复预检测试1"},
+            {"sample_id": "R002", "content": "重复预检测试2"},
+            {"sample_id": "R002", "content": "重复"},
+            {"sample_id": "", "content": "空编号"},
+        ], ["sample_id", "content"])
+
+        self.client.post(
+            "/samples/import/preview",
+            data={"scheme_id": str(self.scheme_id),
+                  "file": (io.BytesIO(samples_csv), "s.csv")},
+            content_type="multipart/form-data", follow_redirects=True,
+        )
+        b1 = self._get_latest_batch_id()
+        orig = self._query_row("SELECT * FROM import_batches WHERE id = ?", (b1,))
+
+        resp = self.client.post(f"/batches/{b1}/replay_preview", follow_redirects=True)
+        self.assertEqual(resp.status_code, 200)
+        page = resp.data.decode("utf-8")
+        self.assertIn("重复预检完成", page)
+
+        b2 = self._get_latest_batch_id()
+        self.assertNotEqual(b1, b2)
+        replay = self._query_row("SELECT * FROM import_batches WHERE id = ?", (b2,))
+        self.assertEqual(replay["status"], "preview")
+        self.assertEqual(replay["total_rows"], orig["total_rows"])
+        self.assertEqual(replay["new_count"], orig["new_count"])
+        self.assertEqual(replay["skip_duplicate_count"], orig["skip_duplicate_count"])
+        self.assertEqual(replay["skip_error_count"], orig["skip_error_count"])
+        self.assertIn("(重复预检)", replay["file_name"])
+
+        replay_preview = json.loads(replay["preview_data"])
+        self.assertEqual(replay_preview.get("replay_of_batch_id"), b1)
+
+    def test_03_replay_preview_annotation_batch(self):
+        """对标注批次执行重复预检。"""
+        self._import_samples_direct(["X001", "X002"])
+
+        ann_csv = make_csv_bytes([
+            {"sample_id": "X001", "label": "positive"},
+            {"sample_id": "X002", "label": "neutral"},
+            {"sample_id": "NOT_EXIST", "label": "positive"},
+            {"sample_id": "X001", "label": "UNKNOWN_LABEL"},
+        ], ["sample_id", "label"])
+
+        self.client.post(
+            "/annotations/import/preview",
+            data={"scheme_id": str(self.scheme_id), "annotator_id": "2",
+                  "file": (io.BytesIO(ann_csv), "a.csv")},
+            content_type="multipart/form-data",
+            follow_redirects=True,
+        )
+        b1 = self._get_latest_batch_id()
+        orig = self._query_row("SELECT * FROM import_batches WHERE id = ?", (b1,))
+
+        self.client.post(f"/batches/{b1}/replay_preview", follow_redirects=True)
+        b2 = self._get_latest_batch_id()
+        replay = self._query_row("SELECT * FROM import_batches WHERE id = ?", (b2,))
+
+        self.assertEqual(replay["total_rows"], orig["total_rows"])
+        self.assertEqual(replay["new_count"], orig["new_count"])
+        self.assertEqual(replay["skip_unknown_label_count"], orig["skip_unknown_label_count"])
+        self.assertEqual(replay["skip_missing_sample_count"], orig["skip_missing_sample_count"])
+
+    # ---------- 3. 撤回后重导统计一致性 ----------
+
+    def test_04_revert_then_reimport_stats_consistent(self):
+        """撤回批次后重新导入同一文件，预检统计应一致（重复项、跳过项数量一致）。"""
+        samples_csv = make_csv_bytes([
+            {"sample_id": "Y001", "content": "一致性测试1"},
+            {"sample_id": "Y002", "content": "一致性测试2"},
+        ], ["sample_id", "content"])
+
+        self.client.post(
+            "/samples/import/preview",
+            data={"scheme_id": str(self.scheme_id),
+                  "file": (io.BytesIO(samples_csv), "s1.csv")},
+            content_type="multipart/form-data", follow_redirects=True,
+        )
+        b1 = self._get_latest_batch_id()
+        self.client.post(f"/batches/{b1}/confirm", follow_redirects=True)
+        first = self._query_row("SELECT * FROM import_batches WHERE id = ?", (b1,))
+
+        self.assertEqual(self._query_count("samples"), 2)
+
+        self.client.post(f"/batches/{b1}/revert", follow_redirects=True)
+        self.assertEqual(self._query_count("samples"), 0)
+
+        self.client.post(
+            "/samples/import/preview",
+            data={"scheme_id": str(self.scheme_id),
+                  "file": (io.BytesIO(samples_csv), "s2.csv")},
+            content_type="multipart/form-data", follow_redirects=True,
+        )
+        b2 = self._get_latest_batch_id()
+        second = self._query_row("SELECT * FROM import_batches WHERE id = ?", (b2,))
+
+        self.assertEqual(first["new_count"], second["new_count"],
+                    "撤回后重导，new_count应一致")
+        self.assertEqual(first["skip_duplicate_count"], second["skip_duplicate_count"],
+                         "撤回后重导，skip_duplicate_count应一致")
+        self.assertEqual(first["skip_error_count"], second["skip_error_count"],
+                         "撤回后重导，skip_error_count应一致")
+        self.assertEqual(first["total_rows"], second["total_rows"])
+
+        self.client.post(f"/batches/{b2}/confirm", follow_redirects=True)
+        self.assertEqual(self._query_count("samples"), 2)
+
+    def test_05_annotation_revert_reimport_consistency(self):
+        """标注：撤回后重导，重复/跳过统计一致。"""
+        self._import_samples_direct(["Z001", "Z002"])
+
+        ann_csv = make_csv_bytes([
+            {"sample_id": "Z001", "label": "positive", "comment": "test1"},
+            {"sample_id": "Z002", "label": "neutral", "comment": "test2"},
+            {"sample_id": "NOT_HERE", "label": "positive", "comment": ""},
+        ], ["sample_id", "label", "comment"])
+
+        self.client.post(
+            "/annotations/import/preview",
+            data={"scheme_id": str(self.scheme_id), "annotator_id": "2",
+                  "file": (io.BytesIO(ann_csv), "ann1.csv")},
+            content_type="multipart/form-data",
+            follow_redirects=True,
+        )
+        b1 = self._get_latest_batch_id()
+        self.client.post(f"/batches/{b1}/confirm", follow_redirects=True)
+        first = self._query_row("SELECT * FROM import_batches WHERE id = ?", (b1,))
+        self.assertEqual(self._query_count("annotations"), 2)
+
+        self.client.post(f"/batches/{b1}/revert", follow_redirects=True)
+        self.assertEqual(self._query_count("annotations"), 0)
+
+        self.client.post(
+            "/annotations/import/preview",
+            data={"scheme_id": str(self.scheme_id), "annotator_id": "2",
+                  "file": (io.BytesIO(ann_csv), "ann2.csv")},
+            content_type="multipart/form-data",
+            follow_redirects=True,
+        )
+        b2 = self._get_latest_batch_id()
+        second = self._query_row("SELECT * FROM import_batches WHERE id = ?", (b2,))
+
+        self.assertEqual(first["new_count"], second["new_count"])
+        self.assertEqual(first["update_count"], second["update_count"])
+        self.assertEqual(first["skip_duplicate_count"], second["skip_duplicate_count"])
+        self.assertEqual(first["skip_missing_sample_count"], second["skip_missing_sample_count"])
+        self.assertEqual(first["skip_error_count"], second["skip_error_count"])
+        self.assertEqual(first["total_rows"], second["total_rows"])
+
+    # ---------- 4. 权限拦截 ----------
+
+    def test_06_annotator_cannot_preview_import(self):
+        """标注员不应能访问样本/标注预检接口（收紧后的管理员权限）。"""
+        self.client.get("/logout")
+        self._login("annotator1", "anno123")
+
+        samples_csv = make_csv_bytes([
+            {"sample_id": "P001", "content": "权限测试样本"}], ["sample_id", "content"])
+        resp = self.client.post(
+            "/samples/import/preview",
+            data={"scheme_id": str(self.scheme_id),
+                  "file": (io.BytesIO(samples_csv), "s.csv")},
+            content_type="multipart/form-data",
+            follow_redirects=True,
+        )
+        page = resp.data.decode("utf-8")
+        self.assertIn("无权限", page)
+        self.assertEqual(self._query_count("import_batches", "batch_type='sample'"), 0)
+
+        self._import_samples_direct(["P001"])
+
+        ann_csv = make_csv_bytes([
+            {"sample_id": "P001", "label": "positive"}], ["sample_id", "label"])
+        resp = self.client.post(
+            "/annotations/import/preview",
+            data={"scheme_id": str(self.scheme_id), "annotator_id": "2",
+                  "file": (io.BytesIO(ann_csv), "a.csv")},
+            content_type="multipart/form-data",
+            follow_redirects=True,
+        )
+        page = resp.data.decode("utf-8")
+        self.assertIn("无权限", page)
+        self.assertEqual(self._query_count("import_batches", "batch_type='annotation'"), 0)
+
+    def test_07_reviewer_cannot_replay_or_revert(self):
+        """复核员不能执行重复预检和撤回。"""
+        samples_csv = make_csv_bytes([
+            {"sample_id": "PERM001", "content": "权限测试"}], ["sample_id", "content"])
+        self._login("admin", "admin123")
+        self.client.post(
+            "/samples/import/preview",
+            data={"scheme_id": str(self.scheme_id),
+                  "file": (io.BytesIO(samples_csv), "s.csv")},
+            content_type="multipart/form-data", follow_redirects=True,
+        )
+        b = self._get_latest_batch_id()
+        self.client.post(f"/batches/{b}/confirm", follow_redirects=True)
+
+        self.client.get("/logout")
+        self._login("reviewer1", "review123")
+
+        resp_replay = self.client.post(f"/batches/{b}/replay_preview", follow_redirects=True)
+        self.assertIn("无权限", resp_replay.data.decode("utf-8"))
+
+        resp_revert = self.client.post(f"/batches/{b}/revert", follow_redirects=True)
+        self.assertIn("无权限", resp_revert.data.decode("utf-8"))
+
+        batch_after = self._query_row("SELECT * FROM import_batches WHERE id = ?", (b,))
+        self.assertEqual(batch_after["status"], "confirmed")
+
+    def test_08_annotator_cannot_confirm_or_replay(self):
+        """标注员不能确认批次、不能重复预检。"""
+        self._login("admin", "admin123")
+        samples_csv = make_csv_bytes([
+            {"sample_id": "PERM002", "content": "权限"}], ["sample_id", "content"])
+        self.client.post(
+            "/samples/import/preview",
+            data={"scheme_id": str(self.scheme_id),
+                  "file": (io.BytesIO(samples_csv), "s.csv")},
+            content_type="multipart/form-data", follow_redirects=True,
+        )
+        b = self._get_latest_batch_id()
+
+        self.client.get("/logout")
+        self._login("annotator1", "anno123")
+
+        resp_confirm = self.client.post(f"/batches/{b}/confirm", follow_redirects=True)
+        self.assertIn("无权限", resp_confirm.data.decode("utf-8"))
+
+        resp_replay = self.client.post(f"/batches/{b}/replay_preview", follow_redirects=True)
+        self.assertIn("无权限", resp_replay.data.decode("utf-8"))
+
+    # ---------- 5. 导出摘要变化 ----------
+
+    def test_09_preview_includes_export_summary(self):
+        """预检数据中应包含导入前后导出摘要。"""
+        samples_csv = make_csv_bytes([
+            {"sample_id": "EXP001", "content": "导出摘要1"},
+            {"sample_id": "EXP002", "content": "导出摘要2"},
+        ], ["sample_id", "content"])
+        self.client.post(
+            "/samples/import/preview",
+            data={"scheme_id": str(self.scheme_id),
+                  "file": (io.BytesIO(samples_csv), "s.csv")},
+            content_type="multipart/form-data",
+            follow_redirects=True,
+        )
+        b = self._get_latest_batch_id()
+        batch = self._query_row("SELECT * FROM import_batches WHERE id = ?", (b,))
+        preview = json.loads(batch["preview_data"])
+
+        self.assertIn("export_summary_before", preview)
+        self.assertIn("export_summary_after", preview)
+
+        before = preview["export_summary_before"]
+        after = preview["export_summary_after"]
+        self.assertEqual(before["total_samples"], 0)
+        self.assertEqual(after["total_samples"], 2)
+
+    def test_10_annotation_export_summary_changes(self):
+        """标注导入应反映标注数量变化。"""
+        self._import_samples_direct(["EXP_A001", "EXP_A002", "EXP_A003"])
+        ann1 = make_csv_bytes([
+            {"sample_id": "EXP_A001", "label": "positive"},
+            {"sample_id": "EXP_A002", "label": "neutral"},
+        ], ["sample_id", "label"])
+        self.client.post(
+            "/annotations/import/preview",
+            data={"scheme_id": str(self.scheme_id), "annotator_id": "2",
+                  "file": (io.BytesIO(ann1), "a1.csv")},
+            content_type="multipart/form-data",
+            follow_redirects=True,
+        )
+        b = self._get_latest_batch_id()
+        batch = self._query_row("SELECT * FROM import_batches WHERE id = ?", (b,))
+        preview = json.loads(batch["preview_data"])
+        self.assertEqual(preview["export_summary_before"]["total_annotations"], 0)
+        self.assertEqual(preview["export_summary_after"]["total_annotations"], 2)
+
+        self.client.post(f"/batches/{b}/confirm", follow_redirects=True)
+
+        ann2 = make_csv_bytes([
+            {"sample_id": "EXP_A003", "label": "negative"},
+        ], ["sample_id", "label"])
+        self.client.post(
+            "/annotations/import/preview",
+            data={"scheme_id": str(self.scheme_id), "annotator_id": "3",
+                  "file": (io.BytesIO(ann2), "a2.csv")},
+            content_type="multipart/form-data",
+            follow_redirects=True,
+        )
+        b2 = self._get_latest_batch_id()
+        batch2 = self._query_row("SELECT * FROM import_batches WHERE id = ?", (b2,))
+        prev2 = json.loads(batch2["preview_data"])
+        self.assertEqual(prev2["export_summary_before"]["total_annotations"], 2)
+        self.assertEqual(prev2["export_summary_after"]["total_annotations"], 3)
+
+    # ---------- 6. 跨重启恢复 ----------
+
+    def test_11_batch_status_persists_and_recoverable(self):
+        """批次状态(preview/confirmed/reverted) 跨重启后保持不变。"""
+        samples_p = make_csv_bytes([
+            {"sample_id": "REST001", "content": "rest1"}], ["sample_id", "content"])
+        self.client.post(
+            "/samples/import/preview",
+            data={"scheme_id": str(self.scheme_id),
+                  "file": (io.BytesIO(samples_p), "s_p.csv")},
+            content_type="multipart/form-data", follow_redirects=True,
+        )
+        preview_id = self._get_latest_batch_id()
+
+        samples_c = make_csv_bytes([
+            {"sample_id": "REST002", "content": "rest2"}], ["sample_id", "content"])
+        self.client.post(
+            "/samples/import/preview",
+            data={"scheme_id": str(self.scheme_id),
+                  "file": (io.BytesIO(samples_c), "s_c.csv")},
+            content_type="multipart/form-data", follow_redirects=True,
+        )
+        confirmed_id = self._get_latest_batch_id()
+        self.client.post(f"/batches/{confirmed_id}/confirm", follow_redirects=True)
+
+        samples_r = make_csv_bytes([
+            {"sample_id": "REST003", "content": "rest3"}], ["sample_id", "content"])
+        self.client.post(
+            "/samples/import/preview",
+            data={"scheme_id": str(self.scheme_id),
+                  "file": (io.BytesIO(samples_r), "s_r.csv")},
+            content_type="multipart/form-data", follow_redirects=True,
+        )
+        reverted_id = self._get_latest_batch_id()
+        self.client.post(f"/batches/{reverted_id}/confirm", follow_redirects=True)
+        self.client.post(f"/batches/{reverted_id}/revert", follow_redirects=True)
+
+        before_states = {
+            preview_id: self._query_row("SELECT * FROM import_batches WHERE id = ?", (preview_id,)),
+            confirmed_id: self._query_row("SELECT * FROM import_batches WHERE id = ?", (confirmed_id,)),
+            reverted_id: self._query_row("SELECT * FROM import_batches WHERE id = ?", (reverted_id,)),
+        }
+        before_details = {
+            "sample_records_p": self._query_count("batch_sample_records", "batch_id=?", (preview_id,)),
+            "sample_records_c": self._query_count("batch_sample_records", "batch_id=?", (confirmed_id,)),
+            "sample_records_r": self._query_count("batch_sample_records", "batch_id=?", (reverted_id,)),
+        }
+
+        old = self.test_db_path
+        models.DB_PATH = self._orig_db_path
+        models.DB_PATH = old
+
+        for bid, bstate in before_states.items():
+            after = self._query_row("SELECT * FROM import_batches WHERE id = ?", (bid,))
+            self.assertEqual(after["status"], bstate["status"])
+            self.assertEqual(after["file_hash"], bstate["file_hash"])
+            self.assertEqual(after["preview_data"], bstate["preview_data"])
+            self.assertEqual(after["config_snapshot"], bstate["config_snapshot"])
+            self.assertEqual(after["new_count"], bstate["new_count"])
+            self.assertEqual(after["created_by"], bstate["created_by"])
+
+        after_details = {
+            "sample_records_p": self._query_count("batch_sample_records", "batch_id=?", (preview_id,)),
+            "sample_records_c": self._query_count("batch_sample_records", "batch_id=?", (confirmed_id,)),
+            "sample_records_r": self._query_count("batch_sample_records", "batch_id=?", (reverted_id,)),
+        }
+        self.assertEqual(after_details, before_details)
+
+    # ---------- 7. 完整链路: 确认导入 → 重复预检 → 撤回 → 重导 ----------
+
+    def test_12_full_chain_confirm_replay_revert_reimport(self):
+        """完整链路跑通：确认导入→重复预检→撤回→重导。"""
+        samples_csv = make_csv_bytes([
+            {"sample_id": "FULL001", "content": "完整链路样本1"},
+            {"sample_id": "FULL002", "content": "完整链路样本2"},
+            {"sample_id": "", "content": "坏行"},
+        ], ["sample_id", "content"]
+        )
+
+        # 第1步: 预检
+        self.client.post(
+            "/samples/import/preview",
+            data={"scheme_id": str(self.scheme_id),
+                  "file": (io.BytesIO(samples_csv), "full.csv")},
+            content_type="multipart/form-data",
+            follow_redirects=True,
+        )
+        b1 = self._get_latest_batch_id()
+        self.assertEqual(self._query_count("samples"), 0)
+        batch_p = self._query_row("SELECT * FROM import_batches WHERE id = ?", (b1,))
+        self.assertEqual(batch_p["status"], "preview")
+        self.assertEqual(batch_p["new_count"], 2)
+        self.assertEqual(batch_p["skip_error_count"], 1)
+
+        # 第2步: 确认导入
+        self.client.post(f"/batches/{b1}/confirm", follow_redirects=True)
+        self.assertEqual(self._query_count("samples"), 2)
+        batch_c = self._query_row("SELECT * FROM import_batches WHERE id = ?", (b1,))
+        self.assertEqual(batch_c["status"], "confirmed")
+
+        # 第3步: 重复预检（基于已确认状态下仍可重复预检）
+        self.client.post(f"/batches/{b1}/replay_preview", follow_redirects=True)
+        b_replay = self._get_latest_batch_id()
+        self.assertNotEqual(b_replay, b1)
+        replay_batch = self._query_row("SELECT * FROM import_batches WHERE id = ?", (b_replay,))
+
+        self.assertEqual(replay_batch["new_count"], 0,
+                         "已确认导入后重复预检，样本已存在，故new_count应为0")
+        self.assertEqual(replay_batch["skip_duplicate_count"], 2,
+                         "2条有效样本因已存在DB，应计为重复")
+        self.assertEqual(replay_batch["skip_error_count"], 1)
+        self.assertEqual(self._query_count("samples"), 2)
+
+        # 第4步: 撤回
+        self.client.post(f"/batches/{b1}/revert", follow_redirects=True)
+        self.assertEqual(self._query_count("samples"), 0)
+        batch_r = self._query_row("SELECT * FROM import_batches WHERE id = ?", (b1,))
+        self.assertEqual(batch_r["status"], "reverted")
+
+        # 第5步: 撤回后再重复预检（基于撤回批次）
+        self.client.post(f"/batches/{b1}/replay_preview", follow_redirects=True)
+        b_replay2 = self._get_latest_batch_id()
+        replay2 = self._query_row("SELECT * FROM import_batches WHERE id = ?", (b_replay2,))
+        self.assertEqual(replay2["new_count"], 2,
+                         "撤回后重复预检，样本已不存在，new_count恢复为2")
+        self.assertEqual(replay2["skip_duplicate_count"], 0)
+        self.assertEqual(replay2["skip_error_count"], 1)
+
+        # 第6步: 撤回后重导（上传同一文件 → 确认）
+        self.client.post(
+            "/samples/import/preview",
+            data={"scheme_id": str(self.scheme_id),
+                  "file": (io.BytesIO(samples_csv), "full_reimport.csv")},
+            content_type="multipart/form-data",
+            follow_redirects=True,
+        )
+        b_reimport = self._get_latest_batch_id()
+        reimp = self._query_row("SELECT * FROM import_batches WHERE id = ?", (b_reimport,))
+        self.assertEqual(reimp["new_count"], 2)
+        self.assertEqual(reimp["skip_error_count"], 1)
+        self.assertEqual(reimp["total_rows"], 3)
+
+        self.client.post(f"/batches/{b_reimport}/confirm", follow_redirects=True)
+        self.assertEqual(self._query_count("samples"), 2)
+        final = self._query_row("SELECT * FROM import_batches WHERE id = ?", (b_reimport,))
+        self.assertEqual(final["status"], "confirmed")
+
+        # 最终：批次数量应正确：b1(preview→confirmed→reverted), b_replay, b_replay2, b_reimport
+        self.assertEqual(self._query_count("import_batches"), 4)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

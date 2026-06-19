@@ -9,7 +9,7 @@
 <div class="two-col">
     <div class="card">
         <div class="card-title">上传标注文件</div>
-        <form method="post" enctype="multipart/form-data">
+        <form method="post" action="{{ url_for('preview_annotations_import') }}" enctype="multipart/form-data">
             <div class="form-group">
                 <label>选择标签方案 *</label>
                 <select name="scheme_id" class="form-control" required>

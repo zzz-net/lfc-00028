@@ -191,6 +191,48 @@ def view_scheme(scheme_id):
     return render_template('scheme_view.html', scheme=scheme, labels=labels, old_annotations=old_annotations)
 
 
+@app.route('/schemes/<int:scheme_id>/labels/new', methods=['POST'])
+@login_required
+@role_required('admin')
+def add_label_to_scheme(scheme_id):
+    conn = get_db()
+    scheme = conn.execute("SELECT * FROM label_schemes WHERE id = ?", (scheme_id,)).fetchone()
+    if not scheme:
+        conn.close()
+        flash('方案不存在', 'error')
+        return redirect(url_for('schemes'))
+
+    label_key = request.form.get('label_key', '').strip()
+    label_text = request.form.get('label_text', '').strip()
+    color = request.form.get('color', '#3b82f6').strip()
+    description = request.form.get('description', '').strip()
+
+    if not label_key or not label_text:
+        conn.close()
+        flash('标签键和标签文本不能为空', 'error')
+        return redirect(url_for('view_scheme', scheme_id=scheme_id))
+
+    try:
+        conn.execute(
+            "INSERT INTO labels (scheme_id, label_key, label_text, color, description) VALUES (?, ?, ?, ?, ?)",
+            (scheme_id, label_key, label_text, color, description)
+        )
+        log_revision('label_scheme', scheme_id, 'add_label',
+                     new_value=f"{label_key}: {label_text}",
+                     user_id=current_user.id,
+                     comment=f"向方案 {scheme['name']} v{scheme['version']} 添加标签",
+                     conn=conn)
+        conn.commit()
+        flash(f'标签 "{label_text}" 添加成功', 'success')
+    except Exception as e:
+        conn.rollback()
+        flash(f'添加标签失败: {e}', 'error')
+    finally:
+        conn.close()
+
+    return redirect(url_for('view_scheme', scheme_id=scheme_id))
+
+
 @app.route('/schemes/<int:scheme_id>/upgrade', methods=['GET', 'POST'])
 @login_required
 @role_required('admin')
@@ -306,6 +348,9 @@ def import_samples():
             conn.close()
             flash('标签方案不存在', 'error')
             return redirect(url_for('import_samples'))
+
+        flash('⚠️ 建议使用新的预演导入流程，可以先预览导入效果再确认入库。'
+              '旧的直接导入方式已不推荐使用。', 'warning')
 
         content = file.read().decode('utf-8-sig')
         reader = csv.DictReader(io.StringIO(content))
@@ -461,6 +506,9 @@ def import_annotations():
             conn.close()
             flash('标注员只能导入自己的标注结果', 'error')
             return redirect(url_for('import_annotations'))
+
+        flash('⚠️ 建议使用新的预演导入流程，可以先预览导入效果再确认入库。'
+              '旧的直接导入方式已不推荐使用。', 'warning')
 
         scheme_labels = conn.execute(
             "SELECT id, label_key, label_text FROM labels WHERE scheme_id = ?", (scheme['id'],)

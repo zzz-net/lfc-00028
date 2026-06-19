@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import json
 from datetime import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_login import UserMixin
@@ -225,6 +226,7 @@ def init_db():
     c.execute('''CREATE INDEX IF NOT EXISTS idx_batch_review_task_records_batch ON batch_review_task_records(batch_id)''')
     c.execute('''CREATE INDEX IF NOT EXISTS idx_batch_revision_links_batch ON batch_revision_links(batch_id)''')
 
+    _migrate_scheme_release_tables(c)
     conn.commit()
 
     admin_exists = c.execute("SELECT COUNT(*) FROM users WHERE username = 'admin'").fetchone()[0]
@@ -795,3 +797,908 @@ def _revert_annotation_batch(batch_id, conn=None):
             log_revision('annotation', rec['annotation_id'], 'revert_update',
                          old_value=rec['new_label_text'], new_value=rec['old_label_text'],
                          conn=conn)
+
+
+def _migrate_scheme_release_tables(c):
+    """迁移：确保发布沙箱相关表存在且有最新字段。"""
+    existing_tables = [row[0] for row in c.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()]
+
+    if 'scheme_release_drafts' not in existing_tables:
+        c.execute('''CREATE TABLE IF NOT EXISTS scheme_release_drafts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT,
+            old_scheme_id INTEGER NOT NULL REFERENCES label_schemes(id),
+            new_scheme_id INTEGER NOT NULL REFERENCES label_schemes(id),
+            status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'published', 'reverted')),
+            mapping_rules TEXT,
+            impact_analysis TEXT,
+            strategy_decisions TEXT,
+            scheme_snapshot_old TEXT,
+            scheme_snapshot_new TEXT,
+            operator_note TEXT,
+            created_by INTEGER NOT NULL REFERENCES users(id),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            published_at TIMESTAMP,
+            published_by INTEGER REFERENCES users(id),
+            reverted_at TIMESTAMP,
+            reverted_by INTEGER REFERENCES users(id),
+            revert_note TEXT
+        )''')
+
+    if 'scheme_release_label_mappings' not in existing_tables:
+        c.execute('''CREATE TABLE IF NOT EXISTS scheme_release_label_mappings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            draft_id INTEGER NOT NULL REFERENCES scheme_release_drafts(id) ON DELETE CASCADE,
+            old_label_id INTEGER REFERENCES labels(id),
+            old_label_key TEXT,
+            old_label_text TEXT,
+            new_label_id INTEGER REFERENCES labels(id),
+            new_label_key TEXT,
+            new_label_text TEXT,
+            mapping_type TEXT NOT NULL CHECK (mapping_type IN (
+                'direct', 'unmapped', 'duplicate', 'conflict'
+            )),
+            strategy TEXT NOT NULL DEFAULT 'prompt' CHECK (strategy IN (
+                'prompt', 'keep_old', 'freeze', 'reopen', 'block', 'use_new'
+            )),
+            affected_count INTEGER DEFAULT 0,
+            note TEXT
+        )''')
+
+    if 'scheme_release_impact_items' not in existing_tables:
+        c.execute('''CREATE TABLE IF NOT EXISTS scheme_release_impact_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            draft_id INTEGER NOT NULL REFERENCES scheme_release_drafts(id) ON DELETE CASCADE,
+            item_type TEXT NOT NULL CHECK (item_type IN (
+                'sample', 'annotation', 'conflict', 'review_task',
+                'stat_caliber', 'export_field'
+            )),
+            item_id INTEGER,
+            item_reference TEXT,
+            impact_level TEXT NOT NULL CHECK (impact_level IN ('low', 'medium', 'high', 'critical')),
+            description TEXT,
+            detail TEXT,
+            is_resolved INTEGER DEFAULT 0
+        )''')
+
+    if 'scheme_release_audit' not in existing_tables:
+        c.execute('''CREATE TABLE IF NOT EXISTS scheme_release_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            draft_id INTEGER NOT NULL REFERENCES scheme_release_drafts(id) ON DELETE CASCADE,
+            action TEXT NOT NULL,
+            old_status TEXT,
+            new_status TEXT,
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            note TEXT,
+            detail TEXT
+        )''')
+
+    existing_cols = [row[1] for row in c.execute("PRAGMA table_info(scheme_release_drafts)").fetchall()]
+    if 'export_field_changes' not in existing_cols:
+        c.execute("ALTER TABLE scheme_release_drafts ADD COLUMN export_field_changes TEXT")
+    if 'stat_caliber_changes' not in existing_cols:
+        c.execute("ALTER TABLE scheme_release_drafts ADD COLUMN stat_caliber_changes TEXT")
+
+
+def init_scheme_release_tables():
+    """初始化发布沙箱相关表。"""
+    conn = get_db()
+    c = conn.cursor()
+    _migrate_scheme_release_tables(c)
+    conn.commit()
+    conn.close()
+
+
+def create_release_draft(name, old_scheme_id, new_scheme_id, created_by,
+                         description=None, mapping_rules=None, conn=None):
+    """创建发布草稿。"""
+    sql = ("INSERT INTO scheme_release_drafts "
+           "(name, description, old_scheme_id, new_scheme_id, created_by, mapping_rules) "
+           "VALUES (?, ?, ?, ?, ?, ?)")
+    params = (name, description, old_scheme_id, new_scheme_id, created_by,
+              json.dumps(mapping_rules, ensure_ascii=False) if mapping_rules else None)
+
+    def _do_insert(c):
+        cursor = c.execute(sql, params)
+        draft_id = cursor.lastrowid
+        _log_release_audit(draft_id, 'create', None, 'draft', created_by,
+                          '创建发布草稿', conn=c)
+        return draft_id
+
+    if conn is not None:
+        return _do_insert(conn)
+
+    c = get_db()
+    try:
+        draft_id = _do_insert(c)
+        c.commit()
+        return draft_id
+    finally:
+        c.close()
+
+
+def get_release_draft(draft_id, conn=None):
+    """获取发布草稿。"""
+    sql = ("SELECT srd.*, "
+           "u1.display_name as creator_name, "
+           "u2.display_name as publisher_name, "
+           "u3.display_name as reverter_name, "
+           "old_s.name as old_scheme_name, old_s.version as old_scheme_version, "
+           "new_s.name as new_scheme_name, new_s.version as new_scheme_version "
+           "FROM scheme_release_drafts srd "
+           "LEFT JOIN users u1 ON u1.id = srd.created_by "
+           "LEFT JOIN users u2 ON u2.id = srd.published_by "
+           "LEFT JOIN users u3 ON u3.id = srd.reverted_by "
+           "LEFT JOIN label_schemes old_s ON old_s.id = srd.old_scheme_id "
+           "LEFT JOIN label_schemes new_s ON new_s.id = srd.new_scheme_id "
+           "WHERE srd.id = ?")
+
+    def _do_query(c):
+        return c.execute(sql, (draft_id,)).fetchone()
+
+    if conn is not None:
+        return _do_query(conn)
+
+    c = get_db()
+    try:
+        return _do_query(c)
+    finally:
+        c.close()
+
+
+def list_release_drafts(status=None, limit=100, conn=None):
+    """列出发布草稿。"""
+    sql = ("SELECT srd.*, "
+           "u1.display_name as creator_name, "
+           "old_s.name as old_scheme_name, old_s.version as old_scheme_version, "
+           "new_s.name as new_scheme_name, new_s.version as new_scheme_version "
+           "FROM scheme_release_drafts srd "
+           "LEFT JOIN users u1 ON u1.id = srd.created_by "
+           "LEFT JOIN label_schemes old_s ON old_s.id = srd.old_scheme_id "
+           "LEFT JOIN label_schemes new_s ON new_s.id = srd.new_scheme_id "
+           "WHERE 1=1")
+    params = []
+    if status:
+        sql += " AND srd.status = ?"
+        params.append(status)
+    sql += " ORDER BY srd.created_at DESC LIMIT ?"
+    params.append(limit)
+
+    def _do_query(c):
+        return c.execute(sql, params).fetchall()
+
+    if conn is not None:
+        return _do_query(conn)
+
+    c = get_db()
+    try:
+        return _do_query(c)
+    finally:
+        c.close()
+
+
+def update_release_draft(draft_id, updates, user_id, conn=None):
+    """更新发布草稿。"""
+    fields = []
+    values = []
+    for key, val in updates.items():
+        if key in ('mapping_rules', 'impact_analysis', 'strategy_decisions',
+                   'scheme_snapshot_old', 'scheme_snapshot_new',
+                   'export_field_changes', 'stat_caliber_changes'):
+            fields.append(f"{key} = ?")
+            values.append(json.dumps(val, ensure_ascii=False) if val is not None else None)
+        else:
+            fields.append(f"{key} = ?")
+            values.append(val)
+    values.append(draft_id)
+    sql = f"UPDATE scheme_release_drafts SET {', '.join(fields)} WHERE id = ?"
+
+    def _do_update(c):
+        c.execute(sql, values)
+        _log_release_audit(draft_id, 'update', None, None, user_id,
+                          '更新草稿内容', detail=str(updates.keys()), conn=c)
+
+    if conn is not None:
+        _do_update(conn)
+        return
+
+    c = get_db()
+    try:
+        _do_update(c)
+        c.commit()
+    finally:
+        c.close()
+
+
+def add_label_mapping(draft_id, mapping_data, conn=None):
+    """添加标签映射。"""
+    sql = ("INSERT INTO scheme_release_label_mappings "
+           "(draft_id, old_label_id, old_label_key, old_label_text, "
+           "new_label_id, new_label_key, new_label_text, "
+           "mapping_type, strategy, affected_count, note) "
+           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    params = (draft_id,
+              mapping_data.get('old_label_id'),
+              mapping_data.get('old_label_key'),
+              mapping_data.get('old_label_text'),
+              mapping_data.get('new_label_id'),
+              mapping_data.get('new_label_key'),
+              mapping_data.get('new_label_text'),
+              mapping_data['mapping_type'],
+              mapping_data.get('strategy', 'prompt'),
+              mapping_data.get('affected_count', 0),
+              mapping_data.get('note'))
+
+    if conn is not None:
+        conn.execute(sql, params)
+        return
+
+    c = get_db()
+    try:
+        c.execute(sql, params)
+        c.commit()
+    finally:
+        c.close()
+
+
+def update_label_mapping(mapping_id, updates, conn=None):
+    """更新标签映射。"""
+    fields = []
+    values = []
+    for key, val in updates.items():
+        fields.append(f"{key} = ?")
+        values.append(val)
+    values.append(mapping_id)
+    sql = f"UPDATE scheme_release_label_mappings SET {', '.join(fields)} WHERE id = ?"
+
+    if conn is not None:
+        conn.execute(sql, values)
+        return
+
+    c = get_db()
+    try:
+        c.execute(sql, values)
+        c.commit()
+    finally:
+        c.close()
+
+
+def get_label_mappings(draft_id, conn=None):
+    """获取草稿的所有标签映射。"""
+    sql = "SELECT * FROM scheme_release_label_mappings WHERE draft_id = ? ORDER BY id"
+
+    def _do_query(c):
+        return c.execute(sql, (draft_id,)).fetchall()
+
+    if conn is not None:
+        return _do_query(conn)
+
+    c = get_db()
+    try:
+        return _do_query(c)
+    finally:
+        c.close()
+
+
+def add_impact_item(draft_id, item_data, conn=None):
+    """添加影响分析项。"""
+    sql = ("INSERT INTO scheme_release_impact_items "
+           "(draft_id, item_type, item_id, item_reference, "
+           "impact_level, description, detail, is_resolved) "
+           "VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+    params = (draft_id,
+              item_data['item_type'],
+              item_data.get('item_id'),
+              item_data.get('item_reference'),
+              item_data['impact_level'],
+              item_data.get('description'),
+              json.dumps(item_data.get('detail'), ensure_ascii=False) if item_data.get('detail') else None,
+              item_data.get('is_resolved', 0))
+
+    if conn is not None:
+        conn.execute(sql, params)
+        return
+
+    c = get_db()
+    try:
+        c.execute(sql, params)
+        c.commit()
+    finally:
+        c.close()
+
+
+def get_impact_items(draft_id, item_type=None, conn=None):
+    """获取草稿的影响分析项。"""
+    sql = "SELECT * FROM scheme_release_impact_items WHERE draft_id = ?"
+    params = [draft_id]
+    if item_type:
+        sql += " AND item_type = ?"
+        params.append(item_type)
+    sql += " ORDER BY impact_level DESC, id"
+
+    def _do_query(c):
+        return c.execute(sql, params).fetchall()
+
+    if conn is not None:
+        return _do_query(conn)
+
+    c = get_db()
+    try:
+        return _do_query(c)
+    finally:
+        c.close()
+
+
+def clear_impact_items(draft_id, item_type=None, conn=None):
+    """清除草稿的影响分析项（用于重新计算）。"""
+    sql = "DELETE FROM scheme_release_impact_items WHERE draft_id = ?"
+    params = [draft_id]
+    if item_type:
+        sql += " AND item_type = ?"
+        params.append(item_type)
+
+    def _do_delete(c):
+        c.execute(sql, params)
+
+    if conn is not None:
+        _do_delete(conn)
+        return
+
+    c = get_db()
+    try:
+        _do_delete(c)
+        c.commit()
+    finally:
+        c.close()
+
+
+def clear_label_mappings(draft_id, conn=None):
+    """清除草稿的标签映射（用于重新计算）。"""
+    sql = "DELETE FROM scheme_release_label_mappings WHERE draft_id = ?"
+
+    def _do_delete(c):
+        c.execute(sql, (draft_id,))
+
+    if conn is not None:
+        _do_delete(conn)
+        return
+
+    c = get_db()
+    try:
+        _do_delete(c)
+        c.commit()
+    finally:
+        c.close()
+
+
+def publish_release_draft(draft_id, published_by, operator_note=None, conn=None):
+    """正式发布草稿。"""
+    draft = get_release_draft(draft_id, conn=conn)
+    if not draft:
+        return False, "草稿不存在"
+    if draft['status'] != 'draft':
+        return False, f"草稿状态为 {draft['status']}，无法发布"
+
+    mappings = get_label_mappings(draft_id, conn=conn)
+    has_block = any(m['strategy'] == 'block' for m in mappings)
+    if has_block:
+        return False, "存在需拦截的标签映射，请先处理所有拦截项"
+
+    has_prompt = any(m['strategy'] == 'prompt' for m in mappings)
+    if has_prompt:
+        return False, "存在未明确策略的标签映射，请先为所有映射选择处理策略"
+
+    def _do_publish(c):
+        c.execute(
+            "UPDATE scheme_release_drafts "
+            "SET status = 'published', published_at = CURRENT_TIMESTAMP, "
+            "published_by = ?, operator_note = ? WHERE id = ?",
+            (published_by, operator_note, draft_id)
+        )
+
+        c.execute(
+            "UPDATE label_schemes SET is_active = 0 "
+            "WHERE name = (SELECT name FROM label_schemes WHERE id = ?) AND id != ?",
+            (draft['new_scheme_id'], draft['new_scheme_id'])
+        )
+        c.execute(
+            "UPDATE label_schemes SET is_active = 1 WHERE id = ?",
+            (draft['new_scheme_id'],)
+        )
+
+        _apply_migration_strategies(draft_id, c)
+
+        _log_release_audit(draft_id, 'publish', 'draft', 'published', published_by,
+                          note=operator_note or '正式发布标签方案', conn=c)
+
+        log_revision('label_scheme', draft['new_scheme_id'], 'release_publish',
+                     old_value=f"{draft['old_scheme_name']} v{draft['old_scheme_version']}",
+                     new_value=f"{draft['new_scheme_name']} v{draft['new_scheme_version']}",
+                     user_id=published_by,
+                     comment=operator_note or f"通过发布沙箱发布，草稿ID: {draft_id}",
+                     conn=c)
+        return True, "发布成功"
+
+    if conn is not None:
+        return _do_publish(conn)
+
+    c = get_db()
+    try:
+        result = _do_publish(c)
+        c.commit()
+        return result
+    finally:
+        c.close()
+
+
+def _apply_migration_strategies(draft_id, conn):
+    """应用迁移策略，处理标注、冲突、复核任务。"""
+    mappings = conn.execute(
+        "SELECT * FROM scheme_release_label_mappings WHERE draft_id = ?",
+        (draft_id,)
+    ).fetchall()
+
+    draft = conn.execute(
+        "SELECT * FROM scheme_release_drafts WHERE id = ?",
+        (draft_id,)
+    ).fetchone()
+
+    for m in mappings:
+        if m['strategy'] == 'use_new' and m['old_label_id'] and m['new_label_id']:
+            conn.execute(
+                "UPDATE annotations SET label_id = ?, label_key = ?, label_text = ?, "
+                "scheme_id = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE label_id = ? AND scheme_id = ?",
+                (m['new_label_id'], m['new_label_key'], m['new_label_text'],
+                 draft['new_scheme_id'], m['old_label_id'], draft['old_scheme_id'])
+            )
+
+        elif m['strategy'] == 'keep_old':
+            conn.execute(
+                "UPDATE annotations SET scheme_id = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE label_id = ? AND scheme_id = ?",
+                (draft['new_scheme_id'], m['old_label_id'], draft['old_scheme_id'])
+            )
+
+        elif m['strategy'] == 'freeze':
+            pass
+
+        elif m['strategy'] == 'reopen':
+            conflicts = conn.execute(
+                "SELECT DISTINCT c.id FROM conflicts c "
+                "JOIN conflict_annotations ca ON ca.conflict_id = c.id "
+                "JOIN annotations a ON a.id = ca.annotation_id "
+                "WHERE a.label_id = ? AND c.scheme_id = ? AND c.status = 'closed'",
+                (m['old_label_id'], draft['old_scheme_id'])
+            ).fetchall()
+            for c_row in conflicts:
+                conn.execute(
+                    "UPDATE conflicts SET status = 'open', resolved_at = NULL, "
+                    "final_label_id = NULL, final_label_key = NULL, "
+                    "final_label_text = NULL, resolved_by = NULL, "
+                    "resolution_note = NULL WHERE id = ?",
+                    (c_row['id'],)
+                )
+                conn.execute(
+                    "UPDATE review_tasks SET status = 'pending' WHERE conflict_id = ?",
+                    (c_row['id'],)
+                )
+
+        elif m['strategy'] == 'block':
+            pass
+
+    conn.execute(
+        "UPDATE samples SET scheme_id = ? WHERE scheme_id = ?",
+        (draft['new_scheme_id'], draft['old_scheme_id'])
+    )
+
+    conn.execute(
+        "UPDATE conflicts SET scheme_id = ? WHERE scheme_id = ?",
+        (draft['old_scheme_id'], draft['old_scheme_id'])
+    )
+
+    conn.execute(
+        "UPDATE review_tasks SET conflict_id = conflict_id WHERE conflict_id IN "
+        "(SELECT id FROM conflicts WHERE scheme_id = ?)",
+        (draft['new_scheme_id'],)
+    )
+
+
+def revert_release_draft(draft_id, reverted_by, revert_note=None, conn=None):
+    """撤回发布，恢复旧方案。"""
+    draft = get_release_draft(draft_id, conn=conn)
+    if not draft:
+        return False, "草稿不存在"
+    if draft['status'] != 'published':
+        return False, f"草稿状态为 {draft['status']}，无法撤回"
+
+    def _do_revert(c):
+        _rollback_migration(draft_id, c)
+
+        c.execute(
+            "UPDATE scheme_release_drafts "
+            "SET status = 'reverted', reverted_at = CURRENT_TIMESTAMP, "
+            "reverted_by = ?, revert_note = ? WHERE id = ?",
+            (reverted_by, revert_note, draft_id)
+        )
+
+        c.execute(
+            "UPDATE label_schemes SET is_active = 0 "
+            "WHERE name = (SELECT name FROM label_schemes WHERE id = ?) AND id != ?",
+            (draft['old_scheme_id'], draft['old_scheme_id'])
+        )
+        c.execute(
+            "UPDATE label_schemes SET is_active = 1 WHERE id = ?",
+            (draft['old_scheme_id'],)
+        )
+
+        _log_release_audit(draft_id, 'revert', 'published', 'reverted', reverted_by,
+                          note=revert_note or '撤回发布，恢复旧方案', conn=c)
+
+        log_revision('label_scheme', draft['old_scheme_id'], 'release_revert',
+                     old_value=f"{draft['new_scheme_name']} v{draft['new_scheme_version']}",
+                     new_value=f"{draft['old_scheme_name']} v{draft['old_scheme_version']}",
+                     user_id=reverted_by,
+                     comment=revert_note or f"撤回发布，草稿ID: {draft_id}",
+                     conn=c)
+        return True, "撤回成功，已恢复旧方案"
+
+    if conn is not None:
+        return _do_revert(conn)
+
+    c = get_db()
+    try:
+        result = _do_revert(c)
+        c.commit()
+        return result
+    finally:
+        c.close()
+
+
+def _rollback_migration(draft_id, conn):
+    """回滚迁移操作。"""
+    draft = conn.execute(
+        "SELECT * FROM scheme_release_drafts WHERE id = ?",
+        (draft_id,)
+    ).fetchone()
+
+    mappings = conn.execute(
+        "SELECT * FROM scheme_release_label_mappings WHERE draft_id = ?",
+        (draft_id,)
+    ).fetchall()
+
+    for m in mappings:
+        if m['strategy'] == 'use_new' and m['old_label_id'] and m['new_label_id']:
+            conn.execute(
+                "UPDATE annotations SET label_id = ?, label_key = ?, label_text = ?, "
+                "scheme_id = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE label_id = ? AND scheme_id = ?",
+                (m['old_label_id'], m['old_label_key'], m['old_label_text'],
+                 draft['old_scheme_id'], m['new_label_id'], draft['new_scheme_id'])
+            )
+        elif m['strategy'] in ('keep_old', 'freeze'):
+            conn.execute(
+                "UPDATE annotations SET scheme_id = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE label_id = ? AND scheme_id = ?",
+                (draft['old_scheme_id'], m['old_label_id'], draft['new_scheme_id'])
+            )
+
+    conn.execute(
+        "UPDATE samples SET scheme_id = ? WHERE scheme_id = ?",
+        (draft['old_scheme_id'], draft['new_scheme_id'])
+    )
+
+    conn.execute(
+        "UPDATE conflicts SET scheme_id = ? WHERE scheme_id = ?",
+        (draft['new_scheme_id'], draft['new_scheme_id'])
+    )
+
+
+def _log_release_audit(draft_id, action, old_status, new_status, user_id,
+                       note=None, detail=None, conn=None):
+    """记录发布审计日志。"""
+    sql = ("INSERT INTO scheme_release_audit "
+           "(draft_id, action, old_status, new_status, user_id, note, detail) "
+           "VALUES (?, ?, ?, ?, ?, ?, ?)")
+    params = (draft_id, action, old_status, new_status, user_id, note,
+              json.dumps(detail, ensure_ascii=False) if detail else None)
+
+    if conn is not None:
+        conn.execute(sql, params)
+        return
+
+    c = get_db()
+    try:
+        c.execute(sql, params)
+        c.commit()
+    finally:
+        c.close()
+
+
+def get_release_audit_log(draft_id, conn=None):
+    """获取发布审计日志。"""
+    sql = ("SELECT sra.*, u.display_name as user_name "
+           "FROM scheme_release_audit sra "
+           "LEFT JOIN users u ON u.id = sra.user_id "
+           "WHERE sra.draft_id = ? ORDER BY sra.created_at DESC")
+
+    def _do_query(c):
+        return c.execute(sql, (draft_id,)).fetchall()
+
+    if conn is not None:
+        return _do_query(conn)
+
+    c = get_db()
+    try:
+        return _do_query(c)
+    finally:
+        c.close()
+
+
+def analyze_release_impact(draft_id, conn=None):
+    """分析发布影响，生成影响分析项。"""
+    draft = get_release_draft(draft_id, conn=conn)
+    if not draft:
+        return False, "草稿不存在"
+
+    def _do_analyze(c):
+        clear_impact_items(draft_id, conn=c)
+        clear_label_mappings(draft_id, conn=c)
+
+        old_labels = c.execute(
+            "SELECT * FROM labels WHERE scheme_id = ? ORDER BY label_key",
+            (draft['old_scheme_id'],)
+        ).fetchall()
+        new_labels = c.execute(
+            "SELECT * FROM labels WHERE scheme_id = ? ORDER BY label_key",
+            (draft['new_scheme_id'],)
+        ).fetchall()
+
+        new_label_keys = {l['label_key']: l for l in new_labels}
+        new_label_texts = {l['label_text']: l for l in new_labels}
+        old_label_keys = {l['label_key']: l for l in old_labels}
+
+        for old_lbl in old_labels:
+            affected_ann_count = c.execute(
+                "SELECT COUNT(*) FROM annotations WHERE label_id = ? AND scheme_id = ?",
+                (old_lbl['id'], draft['old_scheme_id'])
+            ).fetchone()[0]
+
+            if old_lbl['label_key'] in new_label_keys:
+                new_lbl = new_label_keys[old_lbl['label_key']]
+                mapping_type = 'duplicate' if old_lbl['label_text'] != new_lbl['label_text'] else 'direct'
+                add_label_mapping(draft_id, {
+                    'old_label_id': old_lbl['id'],
+                    'old_label_key': old_lbl['label_key'],
+                    'old_label_text': old_lbl['label_text'],
+                    'new_label_id': new_lbl['id'],
+                    'new_label_key': new_lbl['label_key'],
+                    'new_label_text': new_lbl['label_text'],
+                    'mapping_type': mapping_type,
+                    'strategy': 'use_new' if mapping_type == 'direct' else 'prompt',
+                    'affected_count': affected_ann_count,
+                    'note': '键名匹配' if mapping_type == 'direct' else '键名匹配但文本不同，需确认'
+                }, conn=c)
+            elif old_lbl['label_text'] in new_label_texts:
+                new_lbl = new_label_texts[old_lbl['label_text']]
+                add_label_mapping(draft_id, {
+                    'old_label_id': old_lbl['id'],
+                    'old_label_key': old_lbl['label_key'],
+                    'old_label_text': old_lbl['label_text'],
+                    'new_label_id': new_lbl['id'],
+                    'new_label_key': new_lbl['label_key'],
+                    'new_label_text': new_lbl['label_text'],
+                    'mapping_type': 'duplicate',
+                    'strategy': 'prompt',
+                    'affected_count': affected_ann_count,
+                    'note': '文本匹配但键名不同，需确认映射关系'
+                }, conn=c)
+            else:
+                add_label_mapping(draft_id, {
+                    'old_label_id': old_lbl['id'],
+                    'old_label_key': old_lbl['label_key'],
+                    'old_label_text': old_lbl['label_text'],
+                    'new_label_id': None,
+                    'new_label_key': None,
+                    'new_label_text': None,
+                    'mapping_type': 'unmapped',
+                    'strategy': 'prompt',
+                    'affected_count': affected_ann_count,
+                    'note': '新方案中无对应标签，需选择处理策略'
+                }, conn=c)
+
+        for new_lbl in new_labels:
+            if new_lbl['label_key'] not in old_label_keys and new_lbl['label_text'] not in {l['label_text'] for l in old_labels}:
+                add_label_mapping(draft_id, {
+                    'old_label_id': None,
+                    'old_label_key': None,
+                    'old_label_text': None,
+                    'new_label_id': new_lbl['id'],
+                    'new_label_key': new_lbl['label_key'],
+                    'new_label_text': new_lbl['label_text'],
+                    'mapping_type': 'unmapped',
+                    'strategy': 'use_new',
+                    'affected_count': 0,
+                    'note': '新方案新增标签'
+                }, conn=c)
+
+        sample_count = c.execute(
+            "SELECT COUNT(*) FROM samples WHERE scheme_id = ?",
+            (draft['old_scheme_id'],)
+        ).fetchone()[0]
+        if sample_count > 0:
+            add_impact_item(draft_id, {
+                'item_type': 'sample',
+                'item_reference': f'{sample_count}个样本',
+                'impact_level': 'high',
+                'description': f'将有 {sample_count} 个样本切换到新方案',
+                'detail': {'count': sample_count}
+            }, conn=c)
+
+        ann_count = c.execute(
+            "SELECT COUNT(*) FROM annotations WHERE scheme_id = ?",
+            (draft['old_scheme_id'],)
+        ).fetchone()[0]
+        if ann_count > 0:
+            add_impact_item(draft_id, {
+                'item_type': 'annotation',
+                'item_reference': f'{ann_count}条标注',
+                'impact_level': 'high',
+                'description': f'将有 {ann_count} 条标注受方案切换影响',
+                'detail': {'count': ann_count}
+            }, conn=c)
+
+        open_conflicts = c.execute(
+            "SELECT COUNT(*) FROM conflicts WHERE scheme_id = ? AND status IN ('open', 'assigned')",
+            (draft['old_scheme_id'],)
+        ).fetchone()[0]
+        if open_conflicts > 0:
+            add_impact_item(draft_id, {
+                'item_type': 'conflict',
+                'item_reference': f'{open_conflicts}个未结案冲突',
+                'impact_level': 'critical',
+                'description': f'存在 {open_conflicts} 个未结案冲突，需确认处理策略',
+                'detail': {'count': open_conflicts, 'status': 'open/assigned'}
+            }, conn=c)
+
+        closed_conflicts = c.execute(
+            "SELECT COUNT(*) FROM conflicts WHERE scheme_id = ? AND status = 'closed'",
+            (draft['old_scheme_id'],)
+        ).fetchone()[0]
+        if closed_conflicts > 0:
+            add_impact_item(draft_id, {
+                'item_type': 'conflict',
+                'item_reference': f'{closed_conflicts}个已结案冲突',
+                'impact_level': 'medium',
+                'description': f'存在 {closed_conflicts} 个已结案冲突，需确认是否重开',
+                'detail': {'count': closed_conflicts, 'status': 'closed'}
+            }, conn=c)
+
+        pending_reviews = c.execute(
+            "SELECT COUNT(*) FROM review_tasks rt "
+            "JOIN conflicts c ON c.id = rt.conflict_id "
+            "WHERE c.scheme_id = ? AND rt.status IN ('pending', 'in_progress')",
+            (draft['old_scheme_id'],)
+        ).fetchone()[0]
+        if pending_reviews > 0:
+            add_impact_item(draft_id, {
+                'item_type': 'review_task',
+                'item_reference': f'{pending_reviews}个待处理复核任务',
+                'impact_level': 'critical',
+                'description': f'存在 {pending_reviews} 个正在处理的复核任务，需确认处理策略',
+                'detail': {'count': pending_reviews}
+            }, conn=c)
+
+        add_impact_item(draft_id, {
+            'item_type': 'stat_caliber',
+            'item_reference': '统计口径变化',
+            'impact_level': 'medium',
+            'description': '方案切换后，基于标签的统计数据口径将发生变化',
+            'detail': {'note': '建议导出切换前的统计数据进行备份'}
+        }, conn=c)
+
+        add_impact_item(draft_id, {
+            'item_type': 'export_field',
+            'item_reference': '导出字段变化',
+            'impact_level': 'medium',
+            'description': '方案切换后，导出的标签字段将使用新方案定义',
+            'detail': {'note': '可通过导出差异功能查看具体变化'}
+        }, conn=c)
+
+        impact_items = get_impact_items(draft_id, conn=c)
+        mappings = get_label_mappings(draft_id, conn=c)
+
+        old_scheme_data = c.execute(
+            "SELECT * FROM label_schemes WHERE id = ?",
+            (draft['old_scheme_id'],)
+        ).fetchone()
+        new_scheme_data = c.execute(
+            "SELECT * FROM label_schemes WHERE id = ?",
+            (draft['new_scheme_id'],)
+        ).fetchone()
+        old_labels_data = [dict(l) for l in old_labels]
+        new_labels_data = [dict(l) for l in new_labels]
+
+        update_release_draft(draft_id, {
+            'impact_analysis': {
+                'summary': {
+                    'total_samples': sample_count,
+                    'total_annotations': ann_count,
+                    'open_conflicts': open_conflicts,
+                    'closed_conflicts': closed_conflicts,
+                    'pending_reviews': pending_reviews,
+                    'total_mappings': len(mappings),
+                    'unmapped_count': len([m for m in mappings if m['mapping_type'] == 'unmapped' and m['old_label_id']]),
+                    'duplicate_count': len([m for m in mappings if m['mapping_type'] == 'duplicate']),
+                    'prompt_count': len([m for m in mappings if m['strategy'] == 'prompt']),
+                    'block_count': len([m for m in mappings if m['strategy'] == 'block']),
+                },
+                'items': [dict(i) for i in impact_items]
+            },
+            'scheme_snapshot_old': {
+                'scheme': dict(old_scheme_data),
+                'labels': old_labels_data
+            },
+            'scheme_snapshot_new': {
+                'scheme': dict(new_scheme_data),
+                'labels': new_labels_data
+            },
+            'mapping_rules': [dict(m) for m in mappings],
+            'export_field_changes': {
+                'old_fields': [l['label_key'] for l in old_labels],
+                'new_fields': [l['label_key'] for l in new_labels],
+                'added': [l['label_key'] for l in new_labels if l['label_key'] not in old_label_keys],
+                'removed': [l['label_key'] for l in old_labels if l['label_key'] not in {nl['label_key'] for nl in new_labels}]
+            },
+            'stat_caliber_changes': {
+                'note': '标签定义变化将影响所有基于标签的统计指标',
+                'old_label_count': len(old_labels),
+                'new_label_count': len(new_labels)
+            }
+        }, user_id=draft['created_by'], conn=c)
+
+        return True, "影响分析完成"
+
+    if conn is not None:
+        return _do_analyze(conn)
+
+    c = get_db()
+    try:
+        result = _do_analyze(c)
+        c.commit()
+        return result
+    finally:
+        c.close()
+
+
+def generate_diff_export(draft_id, conn=None):
+    """生成差异导出数据。"""
+    draft = get_release_draft(draft_id, conn=conn)
+    if not draft:
+        return None
+
+    def _do_export(c):
+        mappings = get_label_mappings(draft_id, conn=c)
+        impact_items = get_impact_items(draft_id, conn=c)
+        audit_log = get_release_audit_log(draft_id, conn=c)
+
+        return {
+            'draft': dict(draft),
+            'mappings': [dict(m) for m in mappings],
+            'impact_items': [dict(i) for i in impact_items],
+            'audit_log': [dict(a) for a in audit_log],
+            'exported_at': datetime.now().isoformat()
+        }
+
+    if conn is not None:
+        return _do_export(conn)
+
+    c = get_db()
+    try:
+        return _do_export(c)
+    finally:
+        c.close()

@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}方案发布沙箱{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>🚀 方案发布沙箱</h1>
+    <div class="actions">
+        <a href="{{ url_for('scheme_release_new') }}" class="btn btn-primary">+ 新建发布草稿</a>
+    </div>
+</div>
+
+<div class="card">
+    {% if drafts %}
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>草稿名称</th>
+                <th>旧方案</th>
+                <th>新方案</th>
+                <th>状态</th>
+                <th>创建人</th>
+                <th>创建时间</th>
+                <th>发布时间</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for d in drafts %}
+            <tr>
+                <td>#{{ d.id }}</td>
+                <td><strong>{{ d.name }}</strong></td>
+                <td>{{ d.old_scheme_name }} v{{ d.old_scheme_version }}</td>
+                <td>{{ d.new_scheme_name }} v{{ d.new_scheme_version }}</td>
+                <td>
+                    {% if d.status == 'draft' %}
+                    <span class="badge badge-yellow">草稿</span>
+                    {% elif d.status == 'published' %}
+                    <span class="badge badge-green">已发布</span>
+                    {% elif d.status == 'reverted' %}
+                    <span class="badge badge-gray">已撤回</span>
+                    {% endif %}
+                </td>
+                <td>{{ d.creator_name or '-' }}</td>
+                <td class="text-sm text-muted">{{ d.created_at }}</td>
+                <td class="text-sm text-muted">{{ d.published_at or '-' }}</td>
+                <td>
+                    <a href="{{ url_for('scheme_release_preview', draft_id=d.id) }}" class="btn btn-sm btn-outline">查看</a>
+                    <a href="{{ url_for('scheme_release_diff', draft_id=d.id) }}" class="btn btn-sm btn-outline">差异</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <div class="icon">🚀</div>
+        <p>暂无发布草稿</p>
+        <a href="{{ url_for('scheme_release_new') }}" class="btn btn-primary">创建发布草稿</a>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

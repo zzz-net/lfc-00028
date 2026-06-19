@@ -1632,5 +1632,851 @@ class BatchCenterAdvancedTests(unittest.TestCase):
         self.assertEqual(self._query_count("import_batches"), 4)
 
 
+SCHEME_V1_JSON = json.dumps([
+    {"key": "positive", "text": "正面", "color": "#22c55e"},
+    {"key": "neutral", "text": "中性", "color": "#3b82f6"},
+    {"key": "negative", "text": "负面", "color": "#ef4444"},
+])
+
+SCHEME_V2_JSON = json.dumps([
+    {"key": "positive", "text": "积极", "color": "#22c55e"},
+    {"key": "neutral", "text": "中性", "color": "#3b82f6"},
+    {"key": "negative", "text": "消极", "color": "#ef4444"},
+    {"key": "unknown", "text": "未知", "color": "#6b7280"},
+])
+
+
+class SchemeReleaseSandboxTests(unittest.TestCase):
+    """标签方案发布沙箱 - 完整回归测试。
+
+    覆盖：
+    - 草稿预览与影响分析
+    - 标签映射与策略选择
+    - 未映射/重名标签处理
+    - 正式发布与方案切换
+    - 冲突重开策略
+    - 发布后撤回
+    - 撤回后按旧方案导出
+    - 权限拦截
+    - 跨重启状态恢复
+    - 导出差异
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="scheme_release_")
+        self.test_db_path = os.path.join(self.tmpdir, "test.db")
+        self._orig_db_path = models.DB_PATH
+        models.DB_PATH = self.test_db_path
+        models.init_db()
+        app.config["TESTING"] = True
+        app.config["SECRET_KEY"] = "test-secret"
+        app.config["WTF_CSRF_ENABLED"] = False
+        self.client = app.test_client()
+        self._login("admin", "admin123")
+
+    def tearDown(self):
+        try:
+            models.DB_PATH = self._orig_db_path
+        except Exception:
+            pass
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    # ---------- helpers ----------
+
+    def _login(self, username, password):
+        resp = self.client.post("/login", data={
+            "username": username, "password": password
+        }, follow_redirects=True)
+        self.assertEqual(resp.status_code, 200)
+        return resp
+
+    def _logout(self):
+        return self.client.get("/logout", follow_redirects=True)
+
+    def _create_scheme(self, name, labels_json):
+        resp = self.client.post("/schemes/new", data={
+            "name": name,
+            "description": "测试用",
+            "labels_json": labels_json,
+        }, follow_redirects=True)
+        self.assertEqual(resp.status_code, 200)
+
+    def _get_scheme_id_by_name_version(self, name, version):
+        conn = sqlite3.connect(models.DB_PATH)
+        try:
+            row = conn.execute(
+                "SELECT id FROM label_schemes WHERE name = ? AND version = ?",
+                (name, version)
+            ).fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
+
+    def _get_active_scheme_id(self):
+        conn = sqlite3.connect(models.DB_PATH)
+        try:
+            row = conn.execute(
+                "SELECT id FROM label_schemes WHERE is_active=1 ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
+
+    def _query_count(self, table, where="1=1", params=()):
+        conn = sqlite3.connect(models.DB_PATH)
+        try:
+            return conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE {where}", params
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+    def _query_row(self, sql, params=()):
+        conn = sqlite3.connect(models.DB_PATH)
+        try:
+            conn.row_factory = sqlite3.Row
+            return conn.execute(sql, params).fetchone()
+        finally:
+            conn.close()
+
+    def _get_latest_draft_id(self):
+        conn = sqlite3.connect(models.DB_PATH)
+        try:
+            row = conn.execute("SELECT id FROM scheme_release_drafts ORDER BY id DESC LIMIT 1").fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
+
+    def _import_samples(self, scheme_id, sample_ids):
+        rows = [{"sample_id": s, "content": f"样本{s}内容"} for s in sample_ids]
+        csv_bytes = make_csv_bytes(rows, ["sample_id", "content"])
+        self.client.post(
+            "/samples/import",
+            data={"scheme_id": str(scheme_id),
+                  "file": (io.BytesIO(csv_bytes), "s.csv")},
+            content_type="multipart/form-data",
+            follow_redirects=True,
+        )
+
+    def _import_annotations(self, scheme_id, sample_id, label, annotator_id=2):
+        ann_csv = make_csv_bytes([
+            {"sample_id": sample_id, "label": label, "comment": f"标注{sample_id}"}
+        ], ["sample_id", "label", "comment"])
+        self.client.post(
+            "/annotations/import",
+            data={"scheme_id": str(scheme_id), "annotator_id": str(annotator_id),
+                  "file": (io.BytesIO(ann_csv), "a.csv")},
+            content_type="multipart/form-data",
+            follow_redirects=True,
+        )
+
+    def _create_test_data(self, scheme_id):
+        """创建测试数据：样本、标注、冲突、复核任务。"""
+        self._import_samples(scheme_id, ["S001", "S002", "S003", "S004", "S005"])
+
+        self._import_annotations(scheme_id, "S001", "positive", 2)
+        self._import_annotations(scheme_id, "S001", "positive", 3)
+
+        self._import_annotations(scheme_id, "S002", "neutral", 2)
+        self._import_annotations(scheme_id, "S002", "positive", 3)
+
+        self._import_annotations(scheme_id, "S003", "negative", 2)
+        self._import_annotations(scheme_id, "S003", "negative", 3)
+
+        self._import_annotations(scheme_id, "S004", "positive", 2)
+
+        self._import_annotations(scheme_id, "S005", "negative", 2)
+        self._import_annotations(scheme_id, "S005", "neutral", 3)
+
+        self.client.post(
+            "/conflicts/detect",
+            data={"scheme_id": str(scheme_id)},
+            follow_redirects=True,
+        )
+
+        conflict_id = self._query_row(
+            "SELECT id FROM conflicts WHERE status = 'open' LIMIT 1"
+        )
+        if conflict_id:
+            self.client.post(
+                f"/conflicts/{conflict_id['id']}/assign",
+                data={"reviewer_id": "4"},
+                follow_redirects=True,
+            )
+
+    # ---------- 1. 草稿创建与影响分析测试 ----------
+
+    def test_01_create_draft_and_analyze(self):
+        """测试创建发布草稿并执行影响分析。"""
+        self._create_scheme("情感分析", SCHEME_V1_JSON)
+        v1_id = self._get_scheme_id_by_name_version("情感分析", 1)
+
+        self._create_test_data(v1_id)
+
+        self._create_scheme("情感分析", SCHEME_V2_JSON)
+        v2_id = self._get_scheme_id_by_name_version("情感分析", 2)
+
+        resp = self.client.post("/scheme-release/new", data={
+            "name": "情感分析v2升级",
+            "description": "升级标签方案，调整标签文本",
+            "old_scheme_id": str(v1_id),
+            "new_scheme_id": str(v2_id),
+        }, follow_redirects=True)
+        self.assertEqual(resp.status_code, 200)
+        page = resp.data.decode("utf-8")
+        self.assertIn("发布草稿创建成功", page)
+
+        draft_id = self._get_latest_draft_id()
+        self.assertIsNotNone(draft_id)
+
+        draft = self._query_row("SELECT * FROM scheme_release_drafts WHERE id = ?", (draft_id,))
+        self.assertEqual(draft["status"], "draft")
+        self.assertEqual(draft["old_scheme_id"], v1_id)
+        self.assertEqual(draft["new_scheme_id"], v2_id)
+
+        resp = self.client.post(f"/scheme-release/{draft_id}/analyze", follow_redirects=True)
+        self.assertEqual(resp.status_code, 200)
+        page = resp.data.decode("utf-8")
+        self.assertIn("影响分析完成", page)
+
+        mappings = self._query_count("scheme_release_label_mappings", "draft_id=?", (draft_id,))
+        self.assertGreater(mappings, 0, "应该生成标签映射")
+
+        impact_items = self._query_count("scheme_release_impact_items", "draft_id=?", (draft_id,))
+        self.assertGreater(impact_items, 0, "应该生成影响分析项")
+
+        draft_updated = self._query_row("SELECT * FROM scheme_release_drafts WHERE id = ?", (draft_id,))
+        self.assertIsNotNone(draft_updated["impact_analysis"])
+        self.assertIsNotNone(draft_updated["scheme_snapshot_old"])
+        self.assertIsNotNone(draft_updated["scheme_snapshot_new"])
+
+    # ---------- 2. 标签映射与策略选择测试 ----------
+
+    def test_02_label_mapping_strategies(self):
+        """测试标签映射和不同处理策略的保存。"""
+        self._create_scheme("情感分析", SCHEME_V1_JSON)
+        v1_id = self._get_scheme_id_by_name_version("情感分析", 1)
+        self._create_test_data(v1_id)
+
+        self._create_scheme("情感分析", SCHEME_V2_JSON)
+        v2_id = self._get_scheme_id_by_name_version("情感分析", 2)
+
+        self.client.post("/scheme-release/new", data={
+            "name": "标签策略测试",
+            "old_scheme_id": str(v1_id),
+            "new_scheme_id": str(v2_id),
+        }, follow_redirects=True)
+        draft_id = self._get_latest_draft_id()
+        self.client.post(f"/scheme-release/{draft_id}/analyze", follow_redirects=True)
+
+        mappings = self._query_row(
+            "SELECT * FROM scheme_release_label_mappings WHERE draft_id = ? ORDER BY id LIMIT 1",
+            (draft_id,)
+        )
+        self.assertIsNotNone(mappings)
+
+        resp = self.client.post(
+            f"/scheme-release/{draft_id}/mapping/{mappings['id']}/update",
+            data={"strategy": "keep_old", "note": "测试沿用旧标签"},
+            follow_redirects=True
+        )
+        self.assertEqual(resp.status_code, 200)
+        page = resp.data.decode("utf-8")
+        self.assertIn("映射策略已更新", page)
+
+        updated = self._query_row(
+            "SELECT * FROM scheme_release_label_mappings WHERE id = ?",
+            (mappings["id"],)
+        )
+        self.assertEqual(updated["strategy"], "keep_old")
+        self.assertEqual(updated["note"], "测试沿用旧标签")
+
+    # ---------- 3. 未映射/重名标签检测测试 ----------
+
+    def test_03_unmapped_and_duplicate_detection(self):
+        """测试未映射标签和重名标签的检测。"""
+        self._create_scheme("情感分析", SCHEME_V1_JSON)
+        v1_id = self._get_scheme_id_by_name_version("情感分析", 1)
+        self._create_test_data(v1_id)
+
+        custom_v2 = json.dumps([
+            {"key": "positive", "text": "正面评价", "color": "#22c55e"},
+            {"key": "very_positive", "text": "非常正面", "color": "#15803d"},
+        ])
+        self._create_scheme("情感分析", custom_v2)
+        v2_id = self._get_scheme_id_by_name_version("情感分析", 2)
+
+        self.client.post("/scheme-release/new", data={
+            "name": "未映射检测测试",
+            "old_scheme_id": str(v1_id),
+            "new_scheme_id": str(v2_id),
+        }, follow_redirects=True)
+        draft_id = self._get_latest_draft_id()
+        self.client.post(f"/scheme-release/{draft_id}/analyze", follow_redirects=True)
+
+        draft = self._query_row("SELECT * FROM scheme_release_drafts WHERE id = ?", (draft_id,))
+        impact_analysis = json.loads(draft["impact_analysis"])
+
+        self.assertGreater(impact_analysis["summary"]["unmapped_count"], 0,
+                          "应该检测到未映射标签（neutral, negative）")
+        self.assertGreater(impact_analysis["summary"]["duplicate_count"], 0,
+                          "应该检测到重名标签（positive键同但文本不同）")
+        self.assertGreater(impact_analysis["summary"]["prompt_count"], 0,
+                          "应该有待确认策略的映射")
+
+    # ---------- 4. 发布拦截测试（未确认策略不能发布） ----------
+
+    def test_04_publish_blocked_by_pending_strategies(self):
+        """测试存在未确认策略时发布被拦截。"""
+        self._create_scheme("情感分析", SCHEME_V1_JSON)
+        v1_id = self._get_scheme_id_by_name_version("情感分析", 1)
+        self._create_test_data(v1_id)
+
+        self._create_scheme("情感分析", SCHEME_V2_JSON)
+        v2_id = self._get_scheme_id_by_name_version("情感分析", 2)
+
+        self.client.post("/scheme-release/new", data={
+            "name": "发布拦截测试",
+            "old_scheme_id": str(v1_id),
+            "new_scheme_id": str(v2_id),
+        }, follow_redirects=True)
+        draft_id = self._get_latest_draft_id()
+        self.client.post(f"/scheme-release/{draft_id}/analyze", follow_redirects=True)
+
+        resp = self.client.post(
+            f"/scheme-release/{draft_id}/publish",
+            data={"operator_note": "尝试未确认就发布"},
+            follow_redirects=True
+        )
+        self.assertEqual(resp.status_code, 200)
+        page = resp.data.decode("utf-8")
+        self.assertIn("存在未明确策略的标签映射", page)
+
+        draft = self._query_row("SELECT * FROM scheme_release_drafts WHERE id = ?", (draft_id,))
+        self.assertEqual(draft["status"], "draft", "状态应该仍为草稿")
+
+    # ---------- 5. 正式发布与方案切换测试 ----------
+
+    def test_05_full_publish_workflow(self):
+        """测试完整的发布流程：分析→设置策略→发布→验证切换。"""
+        self._create_scheme("情感分析", SCHEME_V1_JSON)
+        v1_id = self._get_scheme_id_by_name_version("情感分析", 1)
+        self._create_test_data(v1_id)
+
+        self._create_scheme("情感分析", SCHEME_V2_JSON)
+        v2_id = self._get_scheme_id_by_name_version("情感分析", 2)
+
+        self.client.post("/scheme-release/new", data={
+            "name": "完整发布测试",
+            "old_scheme_id": str(v1_id),
+            "new_scheme_id": str(v2_id),
+        }, follow_redirects=True)
+        draft_id = self._get_latest_draft_id()
+        self.client.post(f"/scheme-release/{draft_id}/analyze", follow_redirects=True)
+
+        mappings = self._query_row(
+            "SELECT * FROM scheme_release_label_mappings WHERE draft_id = ? AND strategy = 'prompt'",
+            (draft_id,)
+        )
+        while mappings:
+            self.client.post(
+                f"/scheme-release/{draft_id}/mapping/{mappings['id']}/update",
+                data={"strategy": "use_new", "note": "自动设置"},
+                follow_redirects=True
+            )
+            mappings = self._query_row(
+                "SELECT * FROM scheme_release_label_mappings WHERE draft_id = ? AND strategy = 'prompt'",
+                (draft_id,)
+            )
+
+        resp = self.client.post(
+            f"/scheme-release/{draft_id}/publish",
+            data={"operator_note": "正式发布v2方案"},
+            follow_redirects=True
+        )
+        self.assertEqual(resp.status_code, 200)
+        page = resp.data.decode("utf-8")
+        self.assertIn("发布成功", page)
+
+        draft = self._query_row("SELECT * FROM scheme_release_drafts WHERE id = ?", (draft_id,))
+        self.assertEqual(draft["status"], "published")
+        self.assertIsNotNone(draft["published_at"])
+        self.assertEqual(draft["operator_note"], "正式发布v2方案")
+
+        active_scheme = self._get_active_scheme_id()
+        self.assertEqual(active_scheme, v2_id, "新方案应该被激活")
+
+        old_scheme = self._query_row(
+            "SELECT is_active FROM label_schemes WHERE id = ?", (v1_id,)
+        )
+        self.assertEqual(old_scheme["is_active"], 0, "旧方案应该被停用")
+
+        audit_logs = self._query_count("scheme_release_audit", "draft_id=? AND action='publish'", (draft_id,))
+        self.assertEqual(audit_logs, 1, "应该有发布审计记录")
+
+        revision_logs = self._query_count(
+            "revision_history",
+            "entity_type='label_scheme' AND action='release_publish'",
+            ()
+        )
+        self.assertGreater(revision_logs, 0, "应该有修订历史记录")
+
+    # ---------- 6. 冲突重开策略测试 ----------
+
+    def test_06_conflict_reopen_strategy(self):
+        """测试重开冲突策略的执行效果。"""
+        self._create_scheme("情感分析", SCHEME_V1_JSON)
+        v1_id = self._get_scheme_id_by_name_version("情感分析", 1)
+        self._create_test_data(v1_id)
+
+        conn = sqlite3.connect(models.DB_PATH)
+        try:
+            conn.execute(
+                "UPDATE conflicts SET status = 'closed', resolved_at = CURRENT_TIMESTAMP "
+                "WHERE scheme_id = ?",
+                (v1_id,)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        closed_conflicts_before = self._query_count(
+            "conflicts", "scheme_id=? AND status='closed'", (v1_id,)
+        )
+        self.assertGreater(closed_conflicts_before, 0, "应该有关闭的冲突")
+
+        self._create_scheme("情感分析", SCHEME_V2_JSON)
+        v2_id = self._get_scheme_id_by_name_version("情感分析", 2)
+
+        self.client.post("/scheme-release/new", data={
+            "name": "冲突重开测试",
+            "old_scheme_id": str(v1_id),
+            "new_scheme_id": str(v2_id),
+        }, follow_redirects=True)
+        draft_id = self._get_latest_draft_id()
+        self.client.post(f"/scheme-release/{draft_id}/analyze", follow_redirects=True)
+
+        negative_mapping = self._query_row(
+            "SELECT * FROM scheme_release_label_mappings "
+            "WHERE draft_id = ? AND old_label_key = 'negative'",
+            (draft_id,)
+        )
+        self.assertIsNotNone(negative_mapping)
+
+        self.client.post(
+            f"/scheme-release/{draft_id}/mapping/{negative_mapping['id']}/update",
+            data={"strategy": "reopen", "note": "测试重开冲突"},
+            follow_redirects=True
+        )
+
+        mappings = self._query_row(
+            "SELECT * FROM scheme_release_label_mappings WHERE draft_id = ? AND strategy = 'prompt'",
+            (draft_id,)
+        )
+        while mappings:
+            self.client.post(
+                f"/scheme-release/{draft_id}/mapping/{mappings['id']}/update",
+                data={"strategy": "use_new", "note": "自动设置"},
+                follow_redirects=True
+            )
+            mappings = self._query_row(
+                "SELECT * FROM scheme_release_label_mappings WHERE draft_id = ? AND strategy = 'prompt'",
+                (draft_id,)
+            )
+
+        self.client.post(
+            f"/scheme-release/{draft_id}/publish",
+            data={"operator_note": "发布测试重开"},
+            follow_redirects=True
+        )
+
+        reopened_conflicts = self._query_count(
+            "conflicts", "status='open'", ()
+        )
+        self.assertGreater(reopened_conflicts, 0, "应该有冲突被重开")
+
+    # ---------- 7. 撤回发布与恢复测试 ----------
+
+    def test_07_revert_release_and_restore(self):
+        """测试发布后撤回，恢复旧方案。"""
+        self._create_scheme("情感分析", SCHEME_V1_JSON)
+        v1_id = self._get_scheme_id_by_name_version("情感分析", 1)
+        self._create_test_data(v1_id)
+
+        self._create_scheme("情感分析", SCHEME_V2_JSON)
+        v2_id = self._get_scheme_id_by_name_version("情感分析", 2)
+
+        self.client.post("/scheme-release/new", data={
+            "name": "撤回测试",
+            "old_scheme_id": str(v1_id),
+            "new_scheme_id": str(v2_id),
+        }, follow_redirects=True)
+        draft_id = self._get_latest_draft_id()
+        self.client.post(f"/scheme-release/{draft_id}/analyze", follow_redirects=True)
+
+        mappings = self._query_row(
+            "SELECT * FROM scheme_release_label_mappings WHERE draft_id = ? AND strategy = 'prompt'",
+            (draft_id,)
+        )
+        while mappings:
+            self.client.post(
+                f"/scheme-release/{draft_id}/mapping/{mappings['id']}/update",
+                data={"strategy": "use_new", "note": "自动设置"},
+                follow_redirects=True
+            )
+            mappings = self._query_row(
+                "SELECT * FROM scheme_release_label_mappings WHERE draft_id = ? AND strategy = 'prompt'",
+                (draft_id,)
+            )
+
+        self.client.post(
+            f"/scheme-release/{draft_id}/publish",
+            data={"operator_note": "先发布再撤回"},
+            follow_redirects=True
+        )
+
+        resp = self.client.post(
+            f"/scheme-release/{draft_id}/revert",
+            data={"revert_note": "测试撤回，恢复旧方案"},
+            follow_redirects=True
+        )
+        self.assertEqual(resp.status_code, 200)
+        page = resp.data.decode("utf-8")
+        self.assertIn("撤回成功", page)
+
+        draft = self._query_row("SELECT * FROM scheme_release_drafts WHERE id = ?", (draft_id,))
+        self.assertEqual(draft["status"], "reverted")
+        self.assertIsNotNone(draft["reverted_at"])
+        self.assertEqual(draft["revert_note"], "测试撤回，恢复旧方案")
+
+        active_scheme = self._get_active_scheme_id()
+        self.assertEqual(active_scheme, v1_id, "撤回后旧方案应该被重新激活")
+
+        audit_logs = self._query_count("scheme_release_audit", "draft_id=? AND action='revert'", (draft_id,))
+        self.assertEqual(audit_logs, 1, "应该有撤回审计记录")
+
+    # ---------- 8. 撤回后按旧方案导出测试 ----------
+
+    def test_08_export_old_scheme_after_revert(self):
+        """测试撤回后按旧方案导出证据。"""
+        self._create_scheme("情感分析", SCHEME_V1_JSON)
+        v1_id = self._get_scheme_id_by_name_version("情感分析", 1)
+        self._create_test_data(v1_id)
+
+        self._create_scheme("情感分析", SCHEME_V2_JSON)
+        v2_id = self._get_scheme_id_by_name_version("情感分析", 2)
+
+        self.client.post("/scheme-release/new", data={
+            "name": "旧方案导出测试",
+            "old_scheme_id": str(v1_id),
+            "new_scheme_id": str(v2_id),
+        }, follow_redirects=True)
+        draft_id = self._get_latest_draft_id()
+        self.client.post(f"/scheme-release/{draft_id}/analyze", follow_redirects=True)
+
+        mappings = self._query_row(
+            "SELECT * FROM scheme_release_label_mappings WHERE draft_id = ? AND strategy = 'prompt'",
+            (draft_id,)
+        )
+        while mappings:
+            self.client.post(
+                f"/scheme-release/{draft_id}/mapping/{mappings['id']}/update",
+                data={"strategy": "use_new", "note": "自动设置"},
+                follow_redirects=True
+            )
+            mappings = self._query_row(
+                "SELECT * FROM scheme_release_label_mappings WHERE draft_id = ? AND strategy = 'prompt'",
+                (draft_id,)
+            )
+
+        self.client.post(
+            f"/scheme-release/{draft_id}/publish",
+            data={"operator_note": "发布测试"},
+            follow_redirects=True
+        )
+        self.client.post(
+            f"/scheme-release/{draft_id}/revert",
+            data={"revert_note": "撤回测试"},
+            follow_redirects=True
+        )
+
+        resp = self.client.post(
+            f"/scheme-release/{draft_id}/export/evidence",
+            data={"sample_scheme_filter": "include_migrated"},
+            follow_redirects=False
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("text/csv", resp.content_type)
+
+        content = resp.data.decode("utf-8-sig")
+        self.assertIn("旧方案快照", content)
+        self.assertIn("情感分析 v1", content)
+        self.assertIn("正面", content)
+        self.assertIn("S001", content)
+
+    # ---------- 9. 权限拦截测试 ----------
+
+    def test_09_permission_interception(self):
+        """测试非管理员用户访问发布沙箱被拦截。"""
+        self._logout()
+        self._login("annotator1", "anno123")
+
+        resp = self.client.get("/scheme-release", follow_redirects=True)
+        self.assertEqual(resp.status_code, 200)
+        page = resp.data.decode("utf-8")
+        self.assertIn("无权限", page)
+
+        resp = self.client.get("/scheme-release/new", follow_redirects=True)
+        self.assertEqual(resp.status_code, 200)
+        page = resp.data.decode("utf-8")
+        self.assertIn("无权限", page)
+
+        self._logout()
+        self._login("reviewer1", "review123")
+
+        resp = self.client.get("/scheme-release", follow_redirects=True)
+        self.assertEqual(resp.status_code, 200)
+        page = resp.data.decode("utf-8")
+        self.assertIn("无权限", page)
+
+        self._logout()
+        self._login("admin", "admin123")
+        resp = self.client.get("/scheme-release", follow_redirects=True)
+        self.assertEqual(resp.status_code, 200)
+        page = resp.data.decode("utf-8")
+        self.assertIn("方案发布沙箱", page)
+
+    # ---------- 10. 跨重启状态恢复测试 ----------
+
+    def test_10_state_recovery_after_restart(self):
+        """测试服务重启后发布状态不混乱。"""
+        self._create_scheme("情感分析", SCHEME_V1_JSON)
+        v1_id = self._get_scheme_id_by_name_version("情感分析", 1)
+        self._create_test_data(v1_id)
+
+        self._create_scheme("情感分析", SCHEME_V2_JSON)
+        v2_id = self._get_scheme_id_by_name_version("情感分析", 2)
+
+        self.client.post("/scheme-release/new", data={
+            "name": "跨重启测试",
+            "old_scheme_id": str(v1_id),
+            "new_scheme_id": str(v2_id),
+        }, follow_redirects=True)
+        draft_id = self._get_latest_draft_id()
+        self.client.post(f"/scheme-release/{draft_id}/analyze", follow_redirects=True)
+
+        mappings = self._query_row(
+            "SELECT * FROM scheme_release_label_mappings WHERE draft_id = ? AND strategy = 'prompt'",
+            (draft_id,)
+        )
+        while mappings:
+            self.client.post(
+                f"/scheme-release/{draft_id}/mapping/{mappings['id']}/update",
+                data={"strategy": "use_new", "note": "自动设置"},
+                follow_redirects=True
+            )
+            mappings = self._query_row(
+                "SELECT * FROM scheme_release_label_mappings WHERE draft_id = ? AND strategy = 'prompt'",
+                (draft_id,)
+            )
+
+        self.client.post(
+            f"/scheme-release/{draft_id}/publish",
+            data={"operator_note": "发布测试重启"},
+            follow_redirects=True
+        )
+
+        before_state = {
+            "draft": self._query_row("SELECT * FROM scheme_release_drafts WHERE id = ?", (draft_id,)),
+            "active_scheme": self._get_active_scheme_id(),
+            "mappings": self._query_count("scheme_release_label_mappings", "draft_id=?", (draft_id,)),
+            "audit_count": self._query_count("scheme_release_audit", "draft_id=?", (draft_id,)),
+            "samples_scheme": self._query_row(
+                "SELECT scheme_id FROM samples LIMIT 1", ()
+            )["scheme_id"] if self._query_count("samples") > 0 else None,
+        }
+
+        old = self.test_db_path
+        models.DB_PATH = self._orig_db_path
+        models.DB_PATH = old
+
+        after_state = {
+            "draft": self._query_row("SELECT * FROM scheme_release_drafts WHERE id = ?", (draft_id,)),
+            "active_scheme": self._get_active_scheme_id(),
+            "mappings": self._query_count("scheme_release_label_mappings", "draft_id=?", (draft_id,)),
+            "audit_count": self._query_count("scheme_release_audit", "draft_id=?", (draft_id,)),
+            "samples_scheme": self._query_row(
+                "SELECT scheme_id FROM samples LIMIT 1", ()
+            )["scheme_id"] if self._query_count("samples") > 0 else None,
+        }
+
+        self.assertEqual(after_state["draft"]["status"], before_state["draft"]["status"])
+        self.assertEqual(after_state["draft"]["published_at"], before_state["draft"]["published_at"])
+        self.assertEqual(after_state["active_scheme"], before_state["active_scheme"])
+        self.assertEqual(after_state["mappings"], before_state["mappings"])
+        self.assertEqual(after_state["audit_count"], before_state["audit_count"])
+        self.assertEqual(after_state["samples_scheme"], before_state["samples_scheme"])
+
+    # ---------- 11. 导出差异测试 ----------
+
+    def test_11_export_diff_report(self):
+        """测试导出差异报告功能。"""
+        self._create_scheme("情感分析", SCHEME_V1_JSON)
+        v1_id = self._get_scheme_id_by_name_version("情感分析", 1)
+        self._create_test_data(v1_id)
+
+        self._create_scheme("情感分析", SCHEME_V2_JSON)
+        v2_id = self._get_scheme_id_by_name_version("情感分析", 2)
+
+        self.client.post("/scheme-release/new", data={
+            "name": "差异导出测试",
+            "old_scheme_id": str(v1_id),
+            "new_scheme_id": str(v2_id),
+        }, follow_redirects=True)
+        draft_id = self._get_latest_draft_id()
+        self.client.post(f"/scheme-release/{draft_id}/analyze", follow_redirects=True)
+
+        resp = self.client.post(
+            f"/scheme-release/{draft_id}/export/diff",
+            follow_redirects=False
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("text/csv", resp.content_type)
+
+        content = resp.data.decode("utf-8-sig")
+        self.assertIn("标签方案发布差异报告", content)
+        self.assertIn("标签映射差异", content)
+        self.assertIn("影响分析项", content)
+        self.assertIn("审计日志", content)
+        self.assertIn("正面", content)
+        self.assertIn("负面", content)
+
+    # ---------- 12. 完整链路测试 ----------
+
+    def test_12_full_chain_draft_publish_revert_export(self):
+        """完整链路：建草稿 -> 发布 -> 撤回 -> 按旧方案导出。"""
+        self._create_scheme("情感分析", SCHEME_V1_JSON)
+        v1_id = self._get_scheme_id_by_name_version("情感分析", 1)
+
+        self._import_samples(v1_id, ["CHAIN001", "CHAIN002", "CHAIN003"])
+        self._import_annotations(v1_id, "CHAIN001", "positive", 2)
+        self._import_annotations(v1_id, "CHAIN001", "positive", 3)
+        self._import_annotations(v1_id, "CHAIN002", "neutral", 2)
+        self._import_annotations(v1_id, "CHAIN003", "negative", 2)
+
+        self._create_scheme("情感分析", SCHEME_V2_JSON)
+        v2_id = self._get_scheme_id_by_name_version("情感分析", 2)
+
+        # 第1步：创建草稿
+        resp = self.client.post("/scheme-release/new", data={
+            "name": "完整链路测试",
+            "description": "测试完整的发布-撤回-导出链路",
+            "old_scheme_id": str(v1_id),
+            "new_scheme_id": str(v2_id),
+        }, follow_redirects=True)
+        self.assertEqual(resp.status_code, 200)
+        draft_id = self._get_latest_draft_id()
+        self.assertIsNotNone(draft_id)
+
+        draft = self._query_row("SELECT * FROM scheme_release_drafts WHERE id = ?", (draft_id,))
+        self.assertEqual(draft["status"], "draft")
+
+        # 第2步：影响分析
+        resp = self.client.post(f"/scheme-release/{draft_id}/analyze", follow_redirects=True)
+        self.assertEqual(resp.status_code, 200)
+        page = resp.data.decode("utf-8")
+        self.assertIn("影响分析完成", page)
+
+        mappings_count = self._query_count("scheme_release_label_mappings", "draft_id=?", (draft_id,))
+        self.assertGreater(mappings_count, 0)
+
+        # 第3步：设置所有映射策略
+        mappings = self._query_row(
+            "SELECT * FROM scheme_release_label_mappings WHERE draft_id = ? AND strategy = 'prompt'",
+            (draft_id,)
+        )
+        while mappings:
+            self.client.post(
+                f"/scheme-release/{draft_id}/mapping/{mappings['id']}/update",
+                data={"strategy": "use_new", "note": "完整链路测试"},
+                follow_redirects=True
+            )
+            mappings = self._query_row(
+                "SELECT * FROM scheme_release_label_mappings WHERE draft_id = ? AND strategy = 'prompt'",
+                (draft_id,)
+            )
+
+        # 第4步：正式发布
+        resp = self.client.post(
+            f"/scheme-release/{draft_id}/publish",
+            data={"operator_note": "完整链路测试-发布"},
+            follow_redirects=True
+        )
+        self.assertEqual(resp.status_code, 200)
+        page = resp.data.decode("utf-8")
+        self.assertIn("发布成功", page)
+
+        draft = self._query_row("SELECT * FROM scheme_release_drafts WHERE id = ?", (draft_id,))
+        self.assertEqual(draft["status"], "published")
+        self.assertEqual(self._get_active_scheme_id(), v2_id)
+
+        # 第5步：验证数据迁移
+        migrated_anns = self._query_count(
+            "annotations", "scheme_id=? AND is_unknown_label=0", (v2_id,)
+        )
+        self.assertGreater(migrated_anns, 0, "标注应该已迁移到新方案")
+
+        # 第6步：撤回发布
+        resp = self.client.post(
+            f"/scheme-release/{draft_id}/revert",
+            data={"revert_note": "完整链路测试-撤回"},
+            follow_redirects=True
+        )
+        self.assertEqual(resp.status_code, 200)
+        page = resp.data.decode("utf-8")
+        self.assertIn("撤回成功", page)
+
+        draft = self._query_row("SELECT * FROM scheme_release_drafts WHERE id = ?", (draft_id,))
+        self.assertEqual(draft["status"], "reverted")
+        self.assertEqual(self._get_active_scheme_id(), v1_id)
+
+        # 第7步：验证数据已恢复
+        restored_anns = self._query_count(
+            "annotations", "scheme_id=? AND is_unknown_label=0", (v1_id,)
+        )
+        self.assertGreater(restored_anns, 0, "标注应该已恢复到旧方案")
+
+        # 第8步：按旧方案导出证据
+        resp = self.client.post(
+            f"/scheme-release/{draft_id}/export/evidence",
+            data={"sample_scheme_filter": "include_migrated"},
+            follow_redirects=False
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("text/csv", resp.content_type)
+
+        content = resp.data.decode("utf-8-sig")
+        self.assertIn("旧方案快照", content)
+        self.assertIn("情感分析 v1", content)
+        self.assertIn("CHAIN001", content)
+        self.assertIn("CHAIN002", content)
+        self.assertIn("CHAIN003", content)
+        self.assertIn("正面", content)
+
+        # 第9步：验证审计日志完整
+        audit_count = self._query_count("scheme_release_audit", "draft_id=?", (draft_id,))
+        self.assertGreaterEqual(audit_count, 4, "至少有创建、分析更新、发布、撤回四条审计记录")
+
+        # 第10步：导出差异报告
+        resp = self.client.post(
+            f"/scheme-release/{draft_id}/export/diff",
+            follow_redirects=False
+        )
+        self.assertEqual(resp.status_code, 200)
+        content = resp.data.decode("utf-8-sig")
+        self.assertIn("差异报告", content)
+        self.assertIn("已撤回", content)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -12,7 +12,13 @@ from models import (init_db, get_db, User, log_revision, DB_PATH,
                     batch_link_revision, update_batch_stats, confirm_batch,
                     get_batch, list_batches, get_batch_sample_records,
                     get_batch_annotation_records, get_batch_conflict_records,
-                    get_batch_review_task_records, revert_batch)
+                    get_batch_review_task_records, revert_batch,
+                    init_scheme_release_tables, create_release_draft,
+                    get_release_draft, list_release_drafts, update_release_draft,
+                    get_label_mappings, get_impact_items, update_label_mapping,
+                    publish_release_draft, revert_release_draft,
+                    analyze_release_impact, get_release_audit_log,
+                    generate_diff_export)
 
 app = Flask(__name__)
 app.secret_key = 'offline-annotation-review-secret-key-local-only'
@@ -2560,6 +2566,512 @@ def export_batch_diff(batch_id):
         mimetype='text/csv; charset=utf-8',
         headers={'Content-Disposition': f'attachment; filename="{filename}"'}
     )
+
+
+# ============ 标签方案发布沙箱 ============
+
+@app.route('/scheme-release')
+@login_required
+@role_required('admin')
+def scheme_release_list():
+    """发布沙箱列表页。"""
+    drafts = list_release_drafts()
+    conn = get_db()
+    schemes = conn.execute(
+        "SELECT * FROM label_schemes ORDER BY is_active DESC, name, version DESC"
+    ).fetchall()
+    conn.close()
+    return render_template('scheme_release_list.html', drafts=drafts, schemes=schemes)
+
+
+@app.route('/scheme-release/new', methods=['GET', 'POST'])
+@login_required
+@role_required('admin')
+def scheme_release_new():
+    """创建发布草稿。"""
+    conn = get_db()
+    schemes = conn.execute(
+        "SELECT * FROM label_schemes ORDER BY is_active DESC, name, version DESC"
+    ).fetchall()
+
+    if request.method == 'POST':
+        name = request.form.get('name', '').strip()
+        description = request.form.get('description', '').strip()
+        old_scheme_id = request.form.get('old_scheme_id', type=int)
+        new_scheme_id = request.form.get('new_scheme_id', type=int)
+
+        if not name or not old_scheme_id or not new_scheme_id:
+            conn.close()
+            flash('请填写草稿名称并选择新旧方案', 'error')
+            return redirect(url_for('scheme_release_new'))
+
+        if old_scheme_id == new_scheme_id:
+            conn.close()
+            flash('新旧方案不能相同', 'error')
+            return redirect(url_for('scheme_release_new'))
+
+        draft_id = create_release_draft(
+            name=name,
+            old_scheme_id=old_scheme_id,
+            new_scheme_id=new_scheme_id,
+            created_by=current_user.id,
+            description=description,
+            conn=conn
+        )
+
+        conn.commit()
+        conn.close()
+
+        flash('发布草稿创建成功，请进行影响分析', 'success')
+        return redirect(url_for('scheme_release_preview', draft_id=draft_id))
+
+    conn.close()
+    return render_template('scheme_release_new.html', schemes=schemes)
+
+
+@app.route('/scheme-release/<int:draft_id>')
+@login_required
+@role_required('admin')
+def scheme_release_preview(draft_id):
+    """草稿预览页。"""
+    draft = get_release_draft(draft_id)
+    if not draft:
+        flash('草稿不存在', 'error')
+        return redirect(url_for('scheme_release_list'))
+
+    mappings = get_label_mappings(draft_id)
+    impact_items = get_impact_items(draft_id)
+    audit_log = get_release_audit_log(draft_id)
+
+    impact_analysis = None
+    if draft['impact_analysis']:
+        try:
+            impact_analysis = json.loads(draft['impact_analysis'])
+        except:
+            pass
+
+    export_field_changes = None
+    if draft['export_field_changes']:
+        try:
+            export_field_changes = json.loads(draft['export_field_changes'])
+        except:
+            pass
+
+    stat_caliber_changes = None
+    if draft['stat_caliber_changes']:
+        try:
+            stat_caliber_changes = json.loads(draft['stat_caliber_changes'])
+        except:
+            pass
+
+    strategy_map = {
+        'prompt': '待确认',
+        'use_new': '使用新标签',
+        'keep_old': '沿用旧标签',
+        'freeze': '冻结',
+        'reopen': '重开冲突',
+        'block': '拦截'
+    }
+
+    mapping_type_map = {
+        'direct': '直接映射',
+        'unmapped': '未映射',
+        'duplicate': '重名/冲突',
+        'conflict': '冲突'
+    }
+
+    impact_level_map = {
+        'low': '低',
+        'medium': '中',
+        'high': '高',
+        'critical': '严重'
+    }
+
+    return render_template('scheme_release_preview.html',
+                           draft=draft,
+                           mappings=mappings,
+                           impact_items=impact_items,
+                           audit_log=audit_log,
+                           impact_analysis=impact_analysis,
+                           export_field_changes=export_field_changes,
+                           stat_caliber_changes=stat_caliber_changes,
+                           strategy_map=strategy_map,
+                           mapping_type_map=mapping_type_map,
+                           impact_level_map=impact_level_map)
+
+
+@app.route('/scheme-release/<int:draft_id>/analyze', methods=['POST'])
+@login_required
+@role_required('admin')
+def scheme_release_analyze(draft_id):
+    """执行影响分析。"""
+    draft = get_release_draft(draft_id)
+    if not draft:
+        flash('草稿不存在', 'error')
+        return redirect(url_for('scheme_release_list'))
+
+    if draft['status'] != 'draft':
+        flash('只能分析草稿状态的发布', 'error')
+        return redirect(url_for('scheme_release_preview', draft_id=draft_id))
+
+    success, msg = analyze_release_impact(draft_id)
+    if success:
+        flash(msg, 'success')
+    else:
+        flash(msg, 'error')
+
+    return redirect(url_for('scheme_release_preview', draft_id=draft_id))
+
+
+@app.route('/scheme-release/<int:draft_id>/mapping/<int:mapping_id>/update', methods=['POST'])
+@login_required
+@role_required('admin')
+def scheme_release_update_mapping(draft_id, mapping_id):
+    """更新标签映射策略。"""
+    draft = get_release_draft(draft_id)
+    if not draft:
+        flash('草稿不存在', 'error')
+        return redirect(url_for('scheme_release_list'))
+
+    if draft['status'] != 'draft':
+        flash('只能修改草稿状态的映射', 'error')
+        return redirect(url_for('scheme_release_preview', draft_id=draft_id))
+
+    strategy = request.form.get('strategy', '').strip()
+    note = request.form.get('note', '').strip()
+
+    if strategy not in ['use_new', 'keep_old', 'freeze', 'reopen', 'block']:
+        flash('无效的处理策略', 'error')
+        return redirect(url_for('scheme_release_preview', draft_id=draft_id))
+
+    update_label_mapping(mapping_id, {'strategy': strategy, 'note': note})
+    flash('映射策略已更新', 'success')
+    return redirect(url_for('scheme_release_preview', draft_id=draft_id))
+
+
+@app.route('/scheme-release/<int:draft_id>/publish', methods=['POST'])
+@login_required
+@role_required('admin')
+def scheme_release_publish(draft_id):
+    """正式发布。"""
+    draft = get_release_draft(draft_id)
+    if not draft:
+        flash('草稿不存在', 'error')
+        return redirect(url_for('scheme_release_list'))
+
+    operator_note = request.form.get('operator_note', '').strip()
+
+    success, msg = publish_release_draft(draft_id, current_user.id, operator_note)
+    if success:
+        flash(msg, 'success')
+    else:
+        flash(msg, 'error')
+
+    return redirect(url_for('scheme_release_preview', draft_id=draft_id))
+
+
+@app.route('/scheme-release/<int:draft_id>/revert', methods=['POST'])
+@login_required
+@role_required('admin')
+def scheme_release_revert(draft_id):
+    """撤回发布。"""
+    draft = get_release_draft(draft_id)
+    if not draft:
+        flash('草稿不存在', 'error')
+        return redirect(url_for('scheme_release_list'))
+
+    revert_note = request.form.get('revert_note', '').strip()
+
+    success, msg = revert_release_draft(draft_id, current_user.id, revert_note)
+    if success:
+        flash(msg, 'success')
+    else:
+        flash(msg, 'error')
+
+    return redirect(url_for('scheme_release_preview', draft_id=draft_id))
+
+
+@app.route('/scheme-release/<int:draft_id>/diff')
+@login_required
+@role_required('admin')
+def scheme_release_diff(draft_id):
+    """查看差异详情。"""
+    draft = get_release_draft(draft_id)
+    if not draft:
+        flash('草稿不存在', 'error')
+        return redirect(url_for('scheme_release_list'))
+
+    mappings = get_label_mappings(draft_id)
+    impact_items = get_impact_items(draft_id)
+
+    scheme_snapshot_old = None
+    if draft['scheme_snapshot_old']:
+        try:
+            scheme_snapshot_old = json.loads(draft['scheme_snapshot_old'])
+        except:
+            pass
+
+    scheme_snapshot_new = None
+    if draft['scheme_snapshot_new']:
+        try:
+            scheme_snapshot_new = json.loads(draft['scheme_snapshot_new'])
+        except:
+            pass
+
+    export_field_changes = None
+    if draft['export_field_changes']:
+        try:
+            export_field_changes = json.loads(draft['export_field_changes'])
+        except:
+            pass
+
+    return render_template('scheme_release_diff.html',
+                           draft=draft,
+                           mappings=mappings,
+                           impact_items=impact_items,
+                           scheme_snapshot_old=scheme_snapshot_old,
+                           scheme_snapshot_new=scheme_snapshot_new,
+                           export_field_changes=export_field_changes)
+
+
+@app.route('/scheme-release/<int:draft_id>/export/diff', methods=['POST'])
+@login_required
+@role_required('admin')
+def scheme_release_export_diff(draft_id):
+    """导出差异为 CSV。"""
+    draft = get_release_draft(draft_id)
+    if not draft:
+        flash('草稿不存在', 'error')
+        return redirect(url_for('scheme_release_list'))
+
+    diff_data = generate_diff_export(draft_id)
+    if not diff_data:
+        flash('导出失败', 'error')
+        return redirect(url_for('scheme_release_preview', draft_id=draft_id))
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    writer.writerow(['# 标签方案发布差异报告'])
+    writer.writerow([f'# 草稿ID: #{draft_id}'])
+    writer.writerow([f'# 草稿名称: {draft["name"]}'])
+    writer.writerow([f'# 状态: {draft["status"]}'])
+    writer.writerow([f'# 旧方案: {draft["old_scheme_name"]} v{draft["old_scheme_version"]}'])
+    writer.writerow([f'# 新方案: {draft["new_scheme_name"]} v{draft["new_scheme_version"]}'])
+    writer.writerow([f'# 创建人: {draft["creator_name"]}'])
+    writer.writerow([f'# 创建时间: {draft["created_at"]}'])
+    if draft['published_at']:
+        writer.writerow([f'# 发布时间: {draft["published_at"]}'])
+        writer.writerow([f'# 发布人: {draft["publisher_name"] or "-"}'])
+    if draft['reverted_at']:
+        writer.writerow([f'# 撤回时间: {draft["reverted_at"]}'])
+        writer.writerow([f'# 撤回人: {draft["reverter_name"] or "-"}'])
+    writer.writerow([])
+
+    writer.writerow(['## 标签映射差异'])
+    writer.writerow(['映射类型', '旧标签键', '旧标签文本', '新标签键', '新标签文本', '处理策略', '影响数量', '备注'])
+    strategy_map = {
+        'prompt': '待确认', 'use_new': '使用新标签', 'keep_old': '沿用旧标签',
+        'freeze': '冻结', 'reopen': '重开冲突', 'block': '拦截'
+    }
+    type_map = {'direct': '直接映射', 'unmapped': '未映射', 'duplicate': '重名/冲突', 'conflict': '冲突'}
+    for m in diff_data['mappings']:
+        writer.writerow([
+            type_map.get(m['mapping_type'], m['mapping_type']),
+            m['old_label_key'] or '',
+            m['old_label_text'] or '',
+            m['new_label_key'] or '',
+            m['new_label_text'] or '',
+            strategy_map.get(m['strategy'], m['strategy']),
+            m['affected_count'] or 0,
+            m['note'] or ''
+        ])
+    writer.writerow([])
+
+    writer.writerow(['## 影响分析项'])
+    writer.writerow(['类型', '影响级别', '描述', '是否已处理', '参考'])
+    level_map = {'low': '低', 'medium': '中', 'high': '高', 'critical': '严重'}
+    type_item_map = {
+        'sample': '样本', 'annotation': '标注', 'conflict': '冲突',
+        'review_task': '复核任务', 'stat_caliber': '统计口径', 'export_field': '导出字段'
+    }
+    for item in diff_data['impact_items']:
+        writer.writerow([
+            type_item_map.get(item['item_type'], item['item_type']),
+            level_map.get(item['impact_level'], item['impact_level']),
+            item['description'] or '',
+            '是' if item['is_resolved'] else '否',
+            item['item_reference'] or ''
+        ])
+    writer.writerow([])
+
+    writer.writerow(['## 审计日志'])
+    writer.writerow(['时间', '操作', '旧状态', '新状态', '操作人', '备注'])
+    action_map = {
+        'create': '创建', 'update': '更新', 'publish': '发布', 'revert': '撤回'
+    }
+    status_map = {'draft': '草稿', 'published': '已发布', 'reverted': '已撤回'}
+    for a in diff_data['audit_log']:
+        writer.writerow([
+            a['created_at'],
+            action_map.get(a['action'], a['action']),
+            status_map.get(a['old_status'], a['old_status'] or '-'),
+            status_map.get(a['new_status'], a['new_status'] or '-'),
+            a.get('user_name') or '-',
+            a.get('note') or ''
+        ])
+
+    output.seek(0)
+    filename = f"scheme_release_diff_{draft_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    return Response(
+        output.getvalue().encode('utf-8-sig'),
+        mimetype='text/csv; charset=utf-8',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'}
+    )
+
+
+@app.route('/scheme-release/<int:draft_id>/export/evidence', methods=['POST'])
+@login_required
+@role_required('admin')
+def scheme_release_export_evidence(draft_id):
+    """按旧方案导出证据（撤回后使用）。"""
+    draft = get_release_draft(draft_id)
+    if not draft:
+        flash('草稿不存在', 'error')
+        return redirect(url_for('scheme_release_list'))
+
+    if draft['status'] not in ['published', 'reverted']:
+        flash('只能在发布或撤回状态下导出证据', 'error')
+        return redirect(url_for('scheme_release_preview', draft_id=draft_id))
+
+    scheme_id = draft['old_scheme_id']
+    scheme_name = draft['old_scheme_name']
+    scheme_version = draft['old_scheme_version']
+
+    conn = get_db()
+    labels = conn.execute("SELECT * FROM labels WHERE scheme_id = ? ORDER BY label_key", (scheme_id,)).fetchall()
+
+    sample_scheme_filter = request.form.get('sample_scheme_filter', 'auto')
+
+    if sample_scheme_filter == 'old_only':
+        sample_query = "SELECT s.* FROM samples s WHERE s.scheme_id = ? ORDER BY s.sample_id"
+        sample_params = (scheme_id,)
+    elif sample_scheme_filter == 'include_migrated':
+        sample_query = """
+            SELECT s.* FROM samples s
+            WHERE s.scheme_id = ? OR s.id IN (
+                SELECT a.sample_id FROM annotations a WHERE a.scheme_id = ?
+            )
+            ORDER BY s.sample_id
+        """
+        sample_params = (scheme_id, scheme_id)
+    else:
+        if draft['status'] == 'reverted':
+            sample_query = "SELECT s.* FROM samples s WHERE s.scheme_id = ? ORDER BY s.sample_id"
+            sample_params = (scheme_id,)
+        else:
+            sample_query = """
+                SELECT s.* FROM samples s
+                WHERE s.scheme_id = ? OR s.id IN (
+                    SELECT a.sample_id FROM annotations a WHERE a.scheme_id = ?
+                )
+                ORDER BY s.sample_id
+            """
+            sample_params = (scheme_id, scheme_id)
+
+    samples = conn.execute(sample_query, sample_params).fetchall()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    writer.writerow(['# 文本标注复核证据导出（旧方案快照）'])
+    writer.writerow([f'# 来源: 发布沙箱草稿 #{draft_id} - {draft["name"]}'])
+    writer.writerow([f'# 方案: {scheme_name} v{scheme_version}'])
+    writer.writerow([f'# 草稿状态: {draft["status"]}'])
+    writer.writerow([f'# 导出时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'])
+    writer.writerow([f'# 操作人: {current_user.display_name} ({current_user.username})'])
+    writer.writerow([])
+
+    writer.writerow(['## 标签列表'])
+    writer.writerow(['标签键', '标签文本', '描述', '颜色'])
+    for lbl in labels:
+        writer.writerow([lbl['label_key'], lbl['label_text'], lbl['description'] or '', lbl['color']])
+    writer.writerow([])
+
+    writer.writerow(['## 标注与复核证据'])
+    writer.writerow([
+        '样本编号', '样本内容', '标注员', '标注标签', '标注备注',
+        '是否冲突', '复核员', '最终标签', '复核意见', '状态', '标注时间', '复核时间'
+    ])
+
+    for sample in samples:
+        anns = conn.execute(
+            "SELECT a.*, u.display_name as annotator_name FROM annotations a "
+            "JOIN users u ON u.id = a.annotator_id "
+            "WHERE a.sample_id = ? AND a.scheme_id = ? AND a.is_unknown_label = 0 ORDER BY a.created_at",
+            (sample['id'], scheme_id)
+        ).fetchall()
+
+        conflict = conn.execute(
+            "SELECT c.*, u.display_name as resolver_name FROM conflicts c "
+            "LEFT JOIN users u ON u.id = c.resolved_by "
+            "WHERE c.sample_id = ? AND c.scheme_id = ? ORDER BY c.detected_at DESC LIMIT 1",
+            (sample['id'], scheme_id)
+        ).fetchone()
+
+        review_task = None
+        if conflict:
+            review_task = conn.execute(
+                "SELECT rt.*, u.display_name as reviewer_name FROM review_tasks rt "
+                "LEFT JOIN users u ON u.id = rt.reviewer_id "
+                "WHERE rt.conflict_id = ? AND rt.status = 'reviewed' ORDER BY rt.reviewed_at DESC LIMIT 1",
+                (conflict['id'],)
+            ).fetchone()
+
+        if not anns:
+            writer.writerow([
+                sample['sample_id'], sample['content'], '', '', '',
+                '否' if not conflict else '是',
+                review_task['reviewer_name'] if review_task else '',
+                conflict['final_label_text'] if conflict and conflict['final_label_text'] else '',
+                conflict['resolution_note'] if conflict else '',
+                conflict['status'] if conflict else '无标注',
+                '', ''
+            ])
+        else:
+            for ann in anns:
+                writer.writerow([
+                    sample['sample_id'], sample['content'],
+                    ann['annotator_name'],
+                    ann['label_text'] + (' (未知标签!)' if ann['is_unknown_label'] else ''),
+                    ann['comment'] or '',
+                    '否' if not conflict else '是',
+                    review_task['reviewer_name'] if review_task else '',
+                    conflict['final_label_text'] if conflict and conflict['final_label_text'] else '',
+                    conflict['resolution_note'] if conflict else '',
+                    conflict['status'] if conflict else ('一致' if len(set(a['label_key'] for a in anns)) == 1 else '有分歧'),
+                    ann['created_at'],
+                    review_task['reviewed_at'] if review_task else ''
+                ])
+
+    conn.close()
+
+    output.seek(0)
+    filename = f"evidence_old_scheme_{scheme_name.replace(' ', '_')}_v{scheme_version}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    return Response(
+        output.getvalue().encode('utf-8-sig'),
+        mimetype='text/csv; charset=utf-8',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'}
+    )
+
+
+@app.before_request
+def check_scheme_release_state():
+    """跨重启状态恢复：在第一次请求时初始化发布沙箱表。"""
+    try:
+        init_scheme_release_tables()
+    except Exception:
+        pass
 
 
 if __name__ == '__main__':

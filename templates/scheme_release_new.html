@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}新建发布草稿{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>📝 新建发布草稿</h1>
+    <div class="actions">
+        <a href="{{ url_for('scheme_release_list') }}" class="btn btn-outline">返回列表</a>
+    </div>
+</div>
+
+<div class="card">
+    <form method="POST">
+        <div class="form-group">
+            <label>草稿名称 *</label>
+            <input type="text" name="name" class="form-control" placeholder="例如：情感分析方案v2升级" required>
+        </div>
+
+        <div class="form-group">
+            <label>描述说明</label>
+            <textarea name="description" class="form-control" placeholder="简要说明本次发布的目的和变更内容"></textarea>
+        </div>
+
+        <div class="two-col">
+            <div class="form-group">
+                <label>旧方案（将被替换） *</label>
+                <select name="old_scheme_id" class="form-control" required>
+                    <option value="">请选择旧方案</option>
+                    {% for s in schemes %}
+                    <option value="{{ s.id }}" {% if s.is_active %}selected{% endif %}>
+                        {{ s.name }} v{{ s.version }}
+                        {% if s.is_active %}（当前启用）{% endif %}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label>新方案（将启用） *</label>
+                <select name="new_scheme_id" class="form-control" required>
+                    <option value="">请选择新方案</option>
+                    {% for s in schemes %}
+                    <option value="{{ s.id }}">
+                        {{ s.name }} v{{ s.version }}
+                        {% if not s.is_active %}（未启用）{% endif %}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+        </div>
+
+        <div class="card" style="background: #fef3c7; border: 1px solid #fcd34d;">
+            <div class="card-title" style="color: #92400e;">⚠️ 注意事项</div>
+            <ul style="margin-left: 20px; font-size: 14px; color: #92400e;">
+                <li>创建草稿后，系统将自动分析受影响的样本、标注、冲突和复核任务</li>
+                <li>您需要为未映射标签、重名标签等选择处理策略（沿用、冻结、重开或拦截）</li>
+                <li>正式发布前请仔细预览所有变化，确认无误后再执行发布</li>
+                <li>发布后可以撤回，撤回后将恢复旧方案的查看与导出</li>
+            </ul>
+        </div>
+
+        <div class="flex gap-2">
+            <button type="submit" class="btn btn-primary">创建草稿并分析影响</button>
+            <a href="{{ url_for('scheme_release_list') }}" class="btn btn-outline">取消</a>
+        </div>
+    </form>
+</div>
+{% endblock %}

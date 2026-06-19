@@ -1,0 +1,223 @@
+{% extends "base.html" %}
+{% block title %}方案差异详情 - {{ draft.name }}{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>📊 方案差异详情</h1>
+    <div class="actions">
+        <a href="{{ url_for('scheme_release_preview', draft_id=draft.id) }}" class="btn btn-outline">← 返回预览</a>
+        <form method="POST" action="{{ url_for('scheme_release_export_diff', draft_id=draft.id) }}" style="display: inline;">
+            <button type="submit" class="btn btn-primary">📥 导出差异报告</button>
+        </form>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">📝 基本信息</div>
+    <div class="two-col">
+        <div>
+            <p><strong>草稿名称：</strong>{{ draft.name }}</p>
+            <p><strong>状态：</strong>
+                {% if draft.status == 'draft' %}<span class="badge badge-yellow">草稿</span>
+                {% elif draft.status == 'published' %}<span class="badge badge-green">已发布</span>
+                {% else %}<span class="badge badge-gray">已撤回</span>{% endif %}
+            </p>
+            <p><strong>创建人：</strong>{{ draft.creator_name or '-' }}</p>
+            <p><strong>创建时间：</strong>{{ draft.created_at }}</p>
+        </div>
+        <div>
+            <p><strong>旧方案：</strong>{{ draft.old_scheme_name }} v{{ draft.old_scheme_version }}</p>
+            <p><strong>新方案：</strong>{{ draft.new_scheme_name }} v{{ draft.new_scheme_version }}</p>
+            <p><strong>发布时间：</strong>{{ draft.published_at or '-' }}</p>
+            <p><strong>撤回时间：</strong>{{ draft.reverted_at or '-' }}</p>
+        </div>
+    </div>
+</div>
+
+{% if scheme_snapshot_old and scheme_snapshot_new %}
+<div class="card">
+    <div class="card-title">📑 方案快照对比</div>
+    <div class="two-col">
+        <div>
+            <h4 style="margin-bottom: 12px; font-size: 15px;">旧方案标签</h4>
+            <table>
+                <thead>
+                    <tr>
+                        <th>标签键</th>
+                        <th>标签文本</th>
+                        <th>颜色</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for l in scheme_snapshot_old.labels %}
+                    <tr>
+                        <td><code>{{ l.label_key }}</code></td>
+                        <td>{{ l.label_text }}</td>
+                        <td><span class="label-tag" style="background: {{ l.color }};">{{ l.color }}</span></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        <div>
+            <h4 style="margin-bottom: 12px; font-size: 15px;">新方案标签</h4>
+            <table>
+                <thead>
+                    <tr>
+                        <th>标签键</th>
+                        <th>标签文本</th>
+                        <th>颜色</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for l in scheme_snapshot_new.labels %}
+                    <tr>
+                        <td><code>{{ l.label_key }}</code></td>
+                        <td>{{ l.label_text }}</td>
+                        <td><span class="label-tag" style="background: {{ l.color }};">{{ l.color }}</span></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% if mappings %}
+<div class="card">
+    <div class="card-title">🏷️ 标签映射差异</div>
+    <table>
+        <thead>
+            <tr>
+                <th>映射类型</th>
+                <th>旧标签</th>
+                <th>新标签</th>
+                <th>处理策略</th>
+                <th>影响数量</th>
+                <th>备注</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for m in mappings %}
+            <tr {% if m.mapping_type == 'unmapped' and m.old_label_id %}style="background: #fef3c7;"{% elif m.mapping_type == 'duplicate' %}style="background: #fef3c7;"{% endif %}>
+                <td>
+                    {% if m.mapping_type == 'direct' %}<span class="badge badge-green">直接映射</span>
+                    {% elif m.mapping_type == 'unmapped' %}<span class="badge badge-yellow">未映射</span>
+                    {% else %}<span class="badge badge-orange">重名/冲突</span>{% endif %}
+                </td>
+                <td>
+                    {% if m.old_label_key %}
+                    <code>{{ m.old_label_key }}</code><br>
+                    <small class="text-muted">{{ m.old_label_text }}</small>
+                    {% else %}<span class="text-muted">-</span>{% endif %}
+                </td>
+                <td>
+                    {% if m.new_label_key %}
+                    <code>{{ m.new_label_key }}</code><br>
+                    <small class="text-muted">{{ m.new_label_text }}</small>
+                    {% else %}<span class="text-muted">-</span>{% endif %}
+                </td>
+                <td>
+                    {% if m.strategy == 'use_new' %}<span class="badge badge-green">使用新标签</span>
+                    {% elif m.strategy == 'keep_old' %}<span class="badge badge-blue">沿用旧标签</span>
+                    {% elif m.strategy == 'freeze' %}<span class="badge badge-blue">冻结</span>
+                    {% elif m.strategy == 'reopen' %}<span class="badge badge-yellow">重开冲突</span>
+                    {% elif m.strategy == 'block' %}<span class="badge badge-red">拦截</span>
+                    {% else %}<span class="badge badge-yellow">待确认</span>{% endif %}
+                </td>
+                <td>{{ m.affected_count or 0 }}</td>
+                <td class="text-sm text-muted">{{ m.note or '-' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% if impact_items %}
+<div class="card">
+    <div class="card-title">⚠️ 影响项列表</div>
+    <table>
+        <thead>
+            <tr>
+                <th>类型</th>
+                <th>影响级别</th>
+                <th>描述</th>
+                <th>参考</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for item in impact_items %}
+            <tr>
+                <td>
+                    {% if item.item_type == 'sample' %}📋 样本
+                    {% elif item.item_type == 'annotation' %}🏷️ 标注
+                    {% elif item.item_type == 'conflict' %}⚠️ 冲突
+                    {% elif item.item_type == 'review_task' %}🔍 复核任务
+                    {% elif item.item_type == 'stat_caliber' %}📊 统计口径
+                    {% elif item.item_type == 'export_field' %}📤 导出字段{% endif %}
+                </td>
+                <td>
+                    {% if item.impact_level == 'critical' %}<span class="badge badge-red">严重</span>
+                    {% elif item.impact_level == 'high' %}<span class="badge badge-orange">高</span>
+                    {% elif item.impact_level == 'medium' %}<span class="badge badge-yellow">中</span>
+                    {% else %}<span class="badge badge-blue">低</span>{% endif %}
+                </td>
+                <td>{{ item.description }}</td>
+                <td class="text-sm text-muted">{{ item.item_reference or '-' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% if export_field_changes %}
+<div class="card">
+    <div class="card-title">📤 导出字段变化</div>
+    <div class="two-col">
+        <div>
+            <h4 style="margin-bottom: 12px; font-size: 15px;"><span class="badge badge-green">新增字段</span></h4>
+            {% if export_field_changes.added %}
+            <ul>
+                {% for f in export_field_changes.added %}
+                <li><code>{{ f }}</code></li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="text-muted">无新增字段</p>
+            {% endif %}
+        </div>
+        <div>
+            <h4 style="margin-bottom: 12px; font-size: 15px;"><span class="badge badge-red">移除字段</span></h4>
+            {% if export_field_changes.removed %}
+            <ul>
+                {% for f in export_field_changes.removed %}
+                <li><code>{{ f }}</code></li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="text-muted">无移除字段</p>
+            {% endif %}
+        </div>
+    </div>
+    <div class="mt-4">
+        <h4 style="margin-bottom: 12px; font-size: 15px;">完整字段列表</h4>
+        <div class="two-col">
+            <div>
+                <p class="text-muted" style="margin-bottom: 8px;">旧方案字段：</p>
+                {% for f in export_field_changes.old_fields %}
+                <code style="display: inline-block; margin: 2px; padding: 2px 6px; background: #f3f4f6; border-radius: 4px;">{{ f }}</code>
+                {% endfor %}
+            </div>
+            <div>
+                <p class="text-muted" style="margin-bottom: 8px;">新方案字段：</p>
+                {% for f in export_field_changes.new_fields %}
+                <code style="display: inline-block; margin: 2px; padding: 2px 6px; background: #d1fae5; border-radius: 4px;">{{ f }}</code>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}

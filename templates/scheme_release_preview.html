@@ -1,0 +1,337 @@
+{% extends "base.html" %}
+{% block title %}发布草稿预览 - {{ draft.name }}{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>
+        {% if draft.status == 'draft' %}📝{% elif draft.status == 'published' %}✅{% else %}↩️{% endif %}
+        {{ draft.name }}
+        <span class="badge {% if draft.status == 'draft' %}badge-yellow{% elif draft.status == 'published' %}badge-green{% else %}badge-gray{% endif %}" style="font-size: 14px;">
+            {% if draft.status == 'draft' %}草稿{% elif draft.status == 'published' %}已发布{% else %}已撤回{% endif %}
+        </span>
+    </h1>
+    <div class="actions">
+        <a href="{{ url_for('scheme_release_list') }}" class="btn btn-outline">返回列表</a>
+        <a href="{{ url_for('scheme_release_diff', draft_id=draft.id) }}" class="btn btn-outline">查看差异详情</a>
+    </div>
+</div>
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-label">旧方案</div>
+        <div class="stat-value" style="font-size: 18px;">{{ draft.old_scheme_name }} v{{ draft.old_scheme_version }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">新方案</div>
+        <div class="stat-value" style="font-size: 18px;">{{ draft.new_scheme_name }} v{{ draft.new_scheme_version }}</div>
+    </div>
+    {% if impact_analysis %}
+    <div class="stat-card orange">
+        <div class="stat-label">受影响样本</div>
+        <div class="stat-value">{{ impact_analysis.summary.total_samples }}</div>
+    </div>
+    <div class="stat-card orange">
+        <div class="stat-label">受影响标注</div>
+        <div class="stat-value">{{ impact_analysis.summary.total_annotations }}</div>
+    </div>
+    <div class="stat-card red">
+        <div class="stat-label">未结案冲突</div>
+        <div class="stat-value">{{ impact_analysis.summary.open_conflicts }}</div>
+    </div>
+    <div class="stat-card red">
+        <div class="stat-label">待处理复核</div>
+        <div class="stat-value">{{ impact_analysis.summary.pending_reviews }}</div>
+    </div>
+    {% endif %}
+</div>
+
+{% if draft.status == 'draft' and not impact_analysis %}
+<div class="card" style="background: #fef3c7; border: 1px solid #fcd34d;">
+    <div class="card-title" style="color: #92400e;">📊 尚未进行影响分析</div>
+    <p style="color: #92400e; margin-bottom: 16px;">请点击下方按钮执行影响分析，系统将列出所有受影响的内容。</p>
+    <form method="POST" action="{{ url_for('scheme_release_analyze', draft_id=draft.id) }}">
+        <button type="submit" class="btn btn-warning">🔍 执行影响分析</button>
+    </form>
+</div>
+{% endif %}
+
+{% if impact_analysis %}
+<div class="card">
+    <div class="card-title">🔍 影响分析摘要</div>
+    <div class="two-col">
+        <div>
+            <h4 style="margin-bottom: 12px; font-size: 15px;">标签映射</h4>
+            <ul style="list-style: none; padding: 0;">
+                <li style="padding: 6px 0;"><span class="badge badge-blue">总计</span> {{ impact_analysis.summary.total_mappings }} 个标签映射</li>
+                <li style="padding: 6px 0;"><span class="badge badge-yellow">未映射</span> {{ impact_analysis.summary.unmapped_count }} 个旧标签在新方案中无对应</li>
+                <li style="padding: 6px 0;"><span class="badge badge-orange">重名/冲突</span> {{ impact_analysis.summary.duplicate_count }} 个标签需确认映射关系</li>
+                <li style="padding: 6px 0;"><span class="badge badge-red">待确认策略</span> {{ impact_analysis.summary.prompt_count }} 个映射需选择处理策略</li>
+            </ul>
+        </div>
+        <div>
+            <h4 style="margin-bottom: 12px; font-size: 15px;">影响内容</h4>
+            <ul style="list-style: none; padding: 0;">
+                <li style="padding: 6px 0;"><span class="badge badge-blue">已结案冲突</span> {{ impact_analysis.summary.closed_conflicts }} 个</li>
+                <li style="padding: 6px 0;"><span class="badge badge-yellow">统计口径变化</span> 基于标签的统计指标将变化</li>
+                <li style="padding: 6px 0;"><span class="badge badge-yellow">导出字段变化</span> 导出的标签字段将更新</li>
+            </ul>
+        </div>
+    </div>
+</div>
+
+{% if mappings %}
+<div class="card">
+    <div class="card-title">🏷️ 标签映射与处理策略</div>
+    <table>
+        <thead>
+            <tr>
+                <th>映射类型</th>
+                <th>旧标签</th>
+                <th>新标签</th>
+                <th>影响数量</th>
+                <th>处理策略</th>
+                <th>备注</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for m in mappings %}
+            <tr {% if m.strategy == 'prompt' %}style="background: #fef3c7;"{% elif m.strategy == 'block' %}style="background: #fee2e2;"{% endif %}>
+                <td>
+                    <span class="badge {% if m.mapping_type == 'direct' %}badge-green{% elif m.mapping_type == 'unmapped' %}badge-yellow{% else %}badge-orange{% endif %}">
+                        {{ mapping_type_map[m.mapping_type] }}
+                    </span>
+                </td>
+                <td>
+                    {% if m.old_label_key %}
+                    <code>{{ m.old_label_key }}</code>
+                    <br><small class="text-muted">{{ m.old_label_text }}</small>
+                    {% else %}
+                    <span class="text-muted">-</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if m.new_label_key %}
+                    <code>{{ m.new_label_key }}</code>
+                    <br><small class="text-muted">{{ m.new_label_text }}</small>
+                    {% else %}
+                    <span class="text-muted">-</span>
+                    {% endif %}
+                </td>
+                <td>{{ m.affected_count }}</td>
+                <td>
+                    <span class="badge {% if m.strategy == 'prompt' %}badge-yellow{% elif m.strategy == 'block' %}badge-red{% elif m.strategy == 'use_new' %}badge-green{% else %}badge-blue{% endif %}">
+                        {{ strategy_map[m.strategy] }}
+                    </span>
+                </td>
+                <td class="text-sm text-muted">{{ m.note or '-' }}</td>
+                <td>
+                    {% if draft.status == 'draft' %}
+                    <form method="POST" action="{{ url_for('scheme_release_update_mapping', draft_id=draft.id, mapping_id=m.id) }}" style="display: inline;">
+                        <select name="strategy" class="form-control" style="width: auto; display: inline; padding: 4px 8px; font-size: 12px;">
+                            <option value="use_new" {% if m.strategy == 'use_new' %}selected{% endif %}>使用新标签</option>
+                            <option value="keep_old" {% if m.strategy == 'keep_old' %}selected{% endif %}>沿用旧标签</option>
+                            <option value="freeze" {% if m.strategy == 'freeze' %}selected{% endif %}>冻结</option>
+                            <option value="reopen" {% if m.strategy == 'reopen' %}selected{% endif %}>重开冲突</option>
+                            <option value="block" {% if m.strategy == 'block' %}selected{% endif %}>拦截</option>
+                        </select>
+                        <input type="text" name="note" class="form-control" style="width: auto; display: inline; padding: 4px 8px; font-size: 12px; margin-left: 4px;" placeholder="备注" value="{{ m.note or '' }}">
+                        <button type="submit" class="btn btn-sm btn-primary" style="margin-left: 4px;">保存</button>
+                    </form>
+                    {% else %}
+                    <span class="text-muted">-</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% if impact_items %}
+<div class="card">
+    <div class="card-title">⚠️ 影响分析明细</div>
+    <table>
+        <thead>
+            <tr>
+                <th>影响级别</th>
+                <th>类型</th>
+                <th>描述</th>
+                <th>参考</th>
+                <th>状态</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for item in impact_items %}
+            <tr>
+                <td>
+                    <span class="badge {% if item.impact_level == 'critical' %}badge-red{% elif item.impact_level == 'high' %}badge-orange{% elif item.impact_level == 'medium' %}badge-yellow{% else %}badge-blue{% endif %}">
+                        {{ impact_level_map[item.impact_level] }}
+                    </span>
+                </td>
+                <td>
+                    {% if item.item_type == 'sample' %}📋 样本
+                    {% elif item.item_type == 'annotation' %}🏷️ 标注
+                    {% elif item.item_type == 'conflict' %}⚠️ 冲突
+                    {% elif item.item_type == 'review_task' %}🔍 复核任务
+                    {% elif item.item_type == 'stat_caliber' %}📊 统计口径
+                    {% elif item.item_type == 'export_field' %}📤 导出字段
+                    {% endif %}
+                </td>
+                <td>{{ item.description }}</td>
+                <td class="text-sm text-muted">{{ item.item_reference or '-' }}</td>
+                <td>
+                    {% if item.is_resolved %}
+                    <span class="badge badge-green">已处理</span>
+                    {% else %}
+                    <span class="badge badge-yellow">需关注</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% if export_field_changes %}
+<div class="card">
+    <div class="card-title">📤 导出字段变化</div>
+    <div class="two-col">
+        <div>
+            <h4 style="margin-bottom: 12px; font-size: 15px;"><span class="badge badge-green">新增字段</span></h4>
+            {% if export_field_changes.added %}
+            <ul>
+                {% for f in export_field_changes.added %}
+                <li><code>{{ f }}</code></li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="text-muted">无新增字段</p>
+            {% endif %}
+        </div>
+        <div>
+            <h4 style="margin-bottom: 12px; font-size: 15px;"><span class="badge badge-red">移除字段</span></h4>
+            {% if export_field_changes.removed %}
+            <ul>
+                {% for f in export_field_changes.removed %}
+                <li><code>{{ f }}</code></li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="text-muted">无移除字段</p>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% if audit_log %}
+<div class="card">
+    <div class="card-title">📜 审计日志</div>
+    <table>
+        <thead>
+            <tr>
+                <th>时间</th>
+                <th>操作</th>
+                <th>状态变化</th>
+                <th>操作人</th>
+                <th>备注</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for a in audit_log %}
+            <tr>
+                <td class="text-sm text-muted">{{ a.created_at }}</td>
+                <td>
+                    {% if a.action == 'create' %}<span class="badge badge-blue">创建</span>
+                    {% elif a.action == 'update' %}<span class="badge badge-yellow">更新</span>
+                    {% elif a.action == 'publish' %}<span class="badge badge-green">发布</span>
+                    {% elif a.action == 'revert' %}<span class="badge badge-gray">撤回</span>
+                    {% else %}{{ a.action }}{% endif %}
+                </td>
+                <td>
+                    {% if a.old_status and a.new_status %}
+                    {{ strategy_map.get(a.old_status, a.old_status) }} → {{ strategy_map.get(a.new_status, a.new_status) }}
+                    {% else %}
+                    -
+                    {% endif %}
+                </td>
+                <td>{{ a.user_name or '-' }}</td>
+                <td class="text-sm">{{ a.note or '-' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+<div class="card">
+    <div class="card-title">⚙️ 操作</div>
+
+    <form method="POST" action="{{ url_for('scheme_release_export_diff', draft_id=draft.id) }}" style="display: inline; margin-right: 10px;">
+        <button type="submit" class="btn btn-outline">📥 导出差异报告</button>
+    </form>
+
+    {% if draft.status == 'published' or draft.status == 'reverted' %}
+    <form method="POST" action="{{ url_for('scheme_release_export_evidence', draft_id=draft.id) }}" style="display: inline; margin-right: 10px;">
+        <input type="hidden" name="sample_scheme_filter" value="include_migrated">
+        <button type="submit" class="btn btn-outline">📄 按旧方案导出证据</button>
+    </form>
+    {% endif %}
+
+    {% if draft.status == 'draft' and impact_analysis %}
+    <form method="POST" action="{{ url_for('scheme_release_analyze', draft_id=draft.id) }}" style="display: inline; margin-right: 10px;">
+        <button type="submit" class="btn btn-warning">🔄 重新分析</button>
+    </form>
+    {% endif %}
+
+    <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #e5e7eb;">
+        {% if draft.status == 'draft' and impact_analysis %}
+            {% if impact_analysis.summary.prompt_count > 0 or impact_analysis.summary.block_count > 0 %}
+            <div class="card" style="background: #fee2e2; border: 1px solid #fca5a5; margin-bottom: 16px;">
+                <div class="card-title" style="color: #991b1b;">⚠️ 存在待处理项</div>
+                <p style="color: #991b1b;">
+                    还有 <strong>{{ impact_analysis.summary.prompt_count }}</strong> 个映射未选择处理策略，
+                    <strong>{{ impact_analysis.summary.block_count }}</strong> 个映射被标记为拦截。
+                    请先处理所有待确认项后再发布。
+                </p>
+            </div>
+            {% endif %}
+
+            <form method="POST" action="{{ url_for('scheme_release_publish', draft_id=draft.id) }}">
+                <div class="form-group">
+                    <label>发布说明（可选）</label>
+                    <textarea name="operator_note" class="form-control" placeholder="请输入本次发布的说明，将记入审计日志"></textarea>
+                </div>
+                <button type="submit" class="btn btn-success" {% if impact_analysis.summary.prompt_count > 0 or impact_analysis.summary.block_count > 0 %}disabled{% endif %}>
+                    ✅ 正式发布
+                </button>
+            </form>
+        {% endif %}
+
+        {% if draft.status == 'published' %}
+        <form method="POST" action="{{ url_for('scheme_release_revert', draft_id=draft.id) }}">
+            <div class="form-group">
+                <label>撤回说明（可选）</label>
+                <textarea name="revert_note" class="form-control" placeholder="请输入撤回原因，将记入审计日志"></textarea>
+            </div>
+            <button type="submit" class="btn btn-danger" onclick="return confirm('确定要撤回发布吗？撤回后将恢复旧方案。');">
+                ↩️ 撤回发布
+            </button>
+        </form>
+        {% endif %}
+
+        {% if draft.status == 'reverted' %}
+        <div class="card" style="background: #dbeafe; border: 1px solid #93c5fd;">
+            <p style="color: #1e40af; margin-bottom: 0;">
+                ✅ 此发布已被撤回，已恢复为旧方案 <strong>{{ draft.old_scheme_name }} v{{ draft.old_scheme_version }}</strong>。
+                您可以点击"按旧方案导出证据"导出撤回前的旧方案数据。
+            </p>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+{% endif %}
+{% endblock %}
